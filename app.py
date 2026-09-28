@@ -72,7 +72,7 @@ elif hoy.year > ANIO_OPERACIONAL:
 else:
     FECHA_FIN = f"{ANIO_OPERACIONAL}-01"
 
-PRECIO_PPA = 83.29
+PRECIO_PPA = 83.49
 TIPO_CMG = "PRELIMINAR"
 BARRA_CMG_BESS = "M.ELENA_______220"
 
@@ -457,44 +457,318 @@ def leer_hoja_excel(
 
     return df[columnas_requeridas].copy()
 
-
 @st.cache_data(
     ttl=DOCE_HORAS_SEGUNDOS,
     show_spinner=False
 )
-def cargar_budgets_bess():
-    requeridas = [
+def procesar_bess_api(periodos):
+    resumenes_mensuales = []
+    resumenes_diarios = []
+    advertencias = []
+
+    for periodo in periodos:
+        registros_totales = []
+        medidores_correctos = 0
+
+        for mpid in BESS_MPIDS:
+            datos = obtener_datos_prmte(
+                periodo + "012345",
+                mpid,
+                3
+            )
+
+            if datos is None:
+                advertencias.append(
+                    f"BESS, {periodo_a_texto(periodo)}: "
+                    f"sin respuesta para {mpid}."
+                )
+                continue
+
+            registros = extraer_mediciones(
+                datos,
+                3
+            )
+
+            if registros:
+                medidores_correctos += 1
+                registros_totales.extend(
+                    registros
+                )
+            else:
+                advertencias.append(
+                    f"BESS, {periodo_a_texto(periodo)}: "
+                    f"sin mediciones para {mpid}."
+                )
+
+        if medidores_correctos != len(BESS_MPIDS):
+            advertencias.append(
+                f"BESS, {periodo_a_texto(periodo)} "
+                "no se incorporó porque faltan medidores."
+            )
+            continue
+
+        if not registros_totales:
+            advertencias.append(
+                f"BESS, {periodo_a_texto(periodo)} "
+                "no entregó mediciones."
+            )
+            continue
+
+        df = pd.DataFrame(
+            registros_totales
+        )
+
+        df["Fecha"] = parse_fecha_safe(
+            df["Fecha"]
+        )
+
+        df["Energia_kWh"] = (
+            convertir_numerico(
+                df["Energia_kWh"]
+            )
+            .fillna(0)
+        )
+
+        df = df.dropna(
+            subset=["Fecha"]
+        )
+
+        # Suma los cuatro medidores en cada intervalo.
+        df = (
+            df
+            .groupby(
+                "Fecha",
+                as_index=False
+            )
+            .agg(
+                Energia_kWh=(
+                    "Energia_kWh",
+                    "sum"
+                )
+            )
+            .sort_values("Fecha")
+        )
+
+        df_cmg = descargar_cmg_mes(
+            periodo
+        )
+
+        if (
+            df_cmg is None
+            or df_cmg.empty
+        ):
+            advertencias.append(
+                f"BESS, {periodo_a_texto(periodo)}: "
+                "CMG no disponible."
+            )
+            continue
+
+        df = df.merge(
+            df_cmg,
+            on="Fecha",
+            how="left"
+        )
+
+        df["CMG_USD_MWh"] = (
+            df["CMG_USD_MWh"]
+            .fillna(0)
+        )
+
+        df["Energia_MWh"] = (
+            df["Energia_kWh"].abs()
+            / 1000
+        )
+
+        # PPA: 21:00 a 05:59.
+        # Spot: 06:00 a 20:59.
+        df["Tipo"] = "PPA"
+
+        df.loc[
+            (
+                df["Fecha"].dt.hour >= 6
+            )
+            & (
+                df["Fecha"].dt.hour < 21
+            ),
+            "Tipo"
+        ] = "SPOT"
+
+        df["Precio"] = PRECIO_PPA
+
+        df.loc[
+            df["Tipo"] == "SPOT",
+            "Precio"
+        ] = df["CMG_USD_MWh"]
+
+        df["Ingreso_USD"] = (
+            df["Energia_MWh"]
+            * df["Precio"]
+        )
+
+        df["Fecha_Dia"] = (
+            df["Fecha"].dt.normalize()
+        )
+
+        df["Anio"] = (
+            df["Fecha"].dt.year
+        )
+
+        df["Mes"] = (
+            df["Fecha"].dt.month
+        )
+
+        # =================================================
+        # RESUMEN DIARIO
+        # =================================================
+
+        diario_largo = (
+            df
+            .groupby(
+                [
+                    "Fecha_Dia",
+                    "Tipo"
+                ],
+                as_index=False
+            )
+            .agg(
+                Energia_MWh=(
+                    "Energia_MWh",
+                    "sum"
+                )
+            )
+        )
+
+        diario = (
+            diario_largo
+            .pivot_table(
+                index="Fecha_Dia",
+                columns="Tipo",
+                values="Energia_MWh",
+                aggfunc="sum",
+                fill_value=0
+            )
+            .reset_index()
+        )
+
+        diario.columns.name = None
+
+        if "PPA" not in diario.columns:
+            diario["PPA"] = 0
+
+        if "SPOT" not in diario.columns:
+            diario["SPOT"] = 0
+
+        diario = diario.rename(
+            columns={
+                "PPA": "Energia_PPA_MWh",
+                "SPOT": "Energia_Spot_MWh"
+            }
+        )
+
+        diario["Energia_Total_MWh"] = (
+            diario["Energia_PPA_MWh"]
+            + diario["Energia_Spot_MWh"]
+        )
+
+        diario["Anio"] = (
+            diario["Fecha_Dia"].dt.year
+        )
+
+        diario["Mes"] = (
+            diario["Fecha_Dia"].dt.month
+        )
+
+        resumenes_diarios.append(
+            diario
+        )
+
+        # =================================================
+        # RESUMEN MENSUAL
+        # =================================================
+
+        energia_ppa = df.loc[
+            df["Tipo"] == "PPA",
+            "Energia_MWh"
+        ].sum()
+
+        energia_spot = df.loc[
+            df["Tipo"] == "SPOT",
+            "Energia_MWh"
+        ].sum()
+
+        ingreso_ppa = df.loc[
+            df["Tipo"] == "PPA",
+            "Ingreso_USD"
+        ].sum()
+
+        ingreso_spot = df.loc[
+            df["Tipo"] == "SPOT",
+            "Ingreso_USD"
+        ].sum()
+
+        resumenes_mensuales.append({
+            "Anio": int(periodo[:4]),
+            "Mes": int(periodo[4:6]),
+            "Energia_PPA_MWh":
+                energia_ppa,
+            "Energia_Spot_MWh":
+                energia_spot,
+            "Energia_Total_MWh":
+                energia_ppa + energia_spot,
+            "Ingreso_PPA_USD":
+                ingreso_ppa,
+            "Ingreso_Spot_USD":
+                ingreso_spot,
+            "Ingreso_Total_USD":
+                ingreso_ppa + ingreso_spot,
+            "Fuente": "API"
+        })
+
+    columnas_mensuales = [
         "Anio",
         "Mes",
-        "Budget_Generacion_MWh",
-        "Budget_PPA_MWh"
+        "Energia_PPA_MWh",
+        "Energia_Spot_MWh",
+        "Energia_Total_MWh",
+        "Ingreso_PPA_USD",
+        "Ingreso_Spot_USD",
+        "Ingreso_Total_USD",
+        "Fuente"
     ]
 
-    df = leer_hoja_excel(
-        HOJA_BUDGETS_BESS,
-        requeridas
-    )
+    columnas_diarias = [
+        "Fecha_Dia",
+        "Energia_PPA_MWh",
+        "Energia_Spot_MWh",
+        "Energia_Total_MWh",
+        "Anio",
+        "Mes"
+    ]
 
-    for columna in requeridas:
-        df[columna] = convertir_numerico(
-            df[columna]
+    if resumenes_mensuales:
+        df_mensual = pd.DataFrame(
+            resumenes_mensuales
+        )
+    else:
+        df_mensual = pd.DataFrame(
+            columns=columnas_mensuales
         )
 
-    df = df.dropna(
-        subset=["Anio", "Mes"]
-    )
-
-    df["Anio"] = df["Anio"].astype(int)
-    df["Mes"] = df["Mes"].astype(int)
-
-    if df.duplicated(
-        subset=["Anio", "Mes"]
-    ).any():
-        raise ValueError(
-            "Hay meses duplicados en la hoja Budgets."
+    if resumenes_diarios:
+        df_diario = pd.concat(
+            resumenes_diarios,
+            ignore_index=True
+        )
+    else:
+        df_diario = pd.DataFrame(
+            columns=columnas_diarias
         )
 
-    return df
+    return (
+        df_mensual,
+        df_diario,
+        sorted(set(advertencias))
+    )
 
 
 @st.cache_data(
@@ -1203,13 +1477,14 @@ pendientes_proyectos = (
 )
 
 with st.spinner(
-    "Consultando meses pendientes de proyectos..."
+"Consultando meses pendientes del BESS..."
 ):
     (
-        df_proyectos_api,
-        advertencias_proyectos
-    ) = descargar_proyectos_pendientes(
-        pendientes_proyectos
+        df_bess_api,
+        df_bess_diario_api,
+        advertencias_bess
+    ) = procesar_bess_api(
+        periodos_bess_pendientes
     )
 
 fuentes_proyectos = [
@@ -1356,6 +1631,249 @@ anio_seleccionado = st.sidebar.selectbox(
 # =========================================================
 
 st.header("BESS María Elena")
+
+# =========================================================
+# GRAFICO DIARIO DEL BESS
+# =========================================================
+
+st.subheader(
+    "Distribución diaria de energía del BESS"
+)
+
+if df_bess_diario_api.empty:
+    st.info(
+        "No hay información diaria disponible desde la API. "
+        "Los meses cargados desde el Excel contienen solo "
+        "información mensual."
+    )
+
+else:
+    meses_diarios_disponibles = (
+        df_bess_diario_api[
+            [
+                "Anio",
+                "Mes"
+            ]
+        ]
+        .drop_duplicates()
+        .sort_values(
+            ["Anio", "Mes"],
+            ascending=False
+        )
+    )
+
+    opciones_diarias = [
+        (
+            int(fila.Anio),
+            int(fila.Mes)
+        )
+        for fila
+        in meses_diarios_disponibles.itertuples()
+    ]
+
+    periodo_diario = st.selectbox(
+        "Mes para gráfico diario del BESS",
+        options=opciones_diarias,
+        format_func=lambda valor: (
+            f"{MESES_COMPLETOS[valor[1]]} "
+            f"{valor[0]}"
+        ),
+        key="periodo_diario_bess"
+    )
+
+    anio_diario = periodo_diario[0]
+    mes_diario = periodo_diario[1]
+
+    diario_mes = df_bess_diario_api[
+        (
+            df_bess_diario_api["Anio"]
+            == anio_diario
+        )
+        & (
+            df_bess_diario_api["Mes"]
+            == mes_diario
+        )
+    ].copy()
+
+    primer_dia_mes = pd.Timestamp(
+        year=anio_diario,
+        month=mes_diario,
+        day=1
+    )
+
+    numero_ultimo_dia = calendar.monthrange(
+        anio_diario,
+        mes_diario
+    )[1]
+
+    ultimo_dia_mes = pd.Timestamp(
+        year=anio_diario,
+        month=mes_diario,
+        day=numero_ultimo_dia
+    )
+
+    fecha_actual = (
+        pd.Timestamp.now().normalize()
+    )
+
+    if (
+        anio_diario == fecha_actual.year
+        and mes_diario == fecha_actual.month
+    ):
+        ultimo_dia_grafico = min(
+            ultimo_dia_mes,
+            fecha_actual
+        )
+    else:
+        ultimo_dia_grafico = (
+            ultimo_dia_mes
+        )
+
+    calendario_mes = pd.DataFrame({
+        "Fecha_Dia": pd.date_range(
+            start=primer_dia_mes,
+            end=ultimo_dia_grafico,
+            freq="D"
+        )
+    })
+
+    diario_mes = calendario_mes.merge(
+        diario_mes[
+            [
+                "Fecha_Dia",
+                "Energia_PPA_MWh",
+                "Energia_Spot_MWh",
+                "Energia_Total_MWh"
+            ]
+        ],
+        on="Fecha_Dia",
+        how="left"
+    )
+
+    columnas_energia_diaria = [
+        "Energia_PPA_MWh",
+        "Energia_Spot_MWh",
+        "Energia_Total_MWh"
+    ]
+
+    diario_mes[
+        columnas_energia_diaria
+    ] = (
+        diario_mes[
+            columnas_energia_diaria
+        ]
+        .fillna(0)
+    )
+
+    # Barra delgada, equivalente al 40% de un día.
+    ancho_barra_diaria = (
+        0.40
+        * 24
+        * 60
+        * 60
+        * 1000
+    )
+
+    fig_diario_bess = go.Figure()
+
+    # Energía PPA azul.
+    fig_diario_bess.add_trace(
+        go.Bar(
+            x=diario_mes["Fecha_Dia"],
+            y=diario_mes[
+                "Energia_PPA_MWh"
+            ],
+            name="PPA real",
+            marker_color="#1565C0",
+            marker_line_color="#0B3D91",
+            marker_line_width=0.5,
+            width=ancho_barra_diaria,
+            hovertemplate=(
+                "<b>%{x|%d-%m-%Y}</b><br>"
+                "PPA: %{y:,.2f} MWh"
+                "<extra></extra>"
+            )
+        )
+    )
+
+    # Energía Spot celeste.
+    fig_diario_bess.add_trace(
+        go.Bar(
+            x=diario_mes["Fecha_Dia"],
+            y=diario_mes[
+                "Energia_Spot_MWh"
+            ],
+            name="Spot real",
+            marker_color="#65BDEB",
+            marker_line_color="#248CC4",
+            marker_line_width=0.5,
+            width=ancho_barra_diaria,
+            hovertemplate=(
+                "<b>%{x|%d-%m-%Y}</b><br>"
+                "Spot: %{y:,.2f} MWh"
+                "<extra></extra>"
+            )
+        )
+    )
+
+    fig_diario_bess.update_layout(
+        title=(
+            "Inyección diaria BESS, "
+            f"{MESES_COMPLETOS[mes_diario]} "
+            f"{anio_diario}"
+        ),
+        barmode="stack",
+        xaxis_title="Día del mes",
+        yaxis_title="Energía [MWh]",
+        hovermode="x unified",
+        height=500,
+        bargap=0.50,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0
+        ),
+        margin=dict(
+            l=40,
+            r=25,
+            t=80,
+            b=45
+        )
+    )
+
+    fig_diario_bess.update_xaxes(
+        tickmode="linear",
+        dtick=(
+            24
+            * 60
+            * 60
+            * 1000
+        ),
+        tickformat="%d",
+        tickangle=0,
+        range=[
+            primer_dia_mes
+            - pd.Timedelta(hours=12),
+            ultimo_dia_grafico
+            + pd.Timedelta(hours=12)
+        ],
+        showgrid=False
+    )
+
+    fig_diario_bess.update_yaxes(
+        rangemode="tozero",
+        gridcolor=(
+            "rgba(140,140,140,0.22)"
+        )
+    )
+
+    st.plotly_chart(
+        fig_diario_bess,
+        use_container_width=True,
+        key="grafico_diario_bess"
+    )
 
 bess_anio = df_bess_final[
     df_bess_final["Anio"]
