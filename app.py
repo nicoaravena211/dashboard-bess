@@ -456,12 +456,14 @@ else:
     fig_d.update_xaxes(dtick=24*60*60*1000, tickformat="%d", range=[primer-pd.Timedelta(hours=12),ultimo+pd.Timedelta(hours=12)], showgrid=False)
     fig_d.update_yaxes(
     range=[0, 120],
-    dtick=20,
+    tickmode="linear",
     tick0=0,
+    dtick=20,
     title_text="Energía [MWh]",
-    gridcolor=COLOR_REJILLA,
+    gridcolor="rgba(128, 128, 128, 0.20)",
     zeroline=True,
-    zerolinecolor=COLOR_AZUL
+    zerolinecolor="rgba(80, 80, 80, 0.50)",
+    zerolinewidth=1
     )
     st.plotly_chart(fig_d, use_container_width=True, key="grafico_diario_bess")
 
