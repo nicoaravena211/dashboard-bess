@@ -15,9 +15,9 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 st.set_page_config(page_title="Dashboard de Operación", page_icon="⚡", layout="wide")
 
-DOCE_HORAS_SEGUNDOS = 12 * 60 * 60
-DOCE_HORAS_MS = 12 * 60 * 60 * 1000
-st_autorefresh(interval=DOCE_HORAS_MS, key="actualizacion_dashboard_12h")
+CACHE_SEGUNDOS = 12 * 60 * 60
+REFRESCO_MS = 12 * 60 * 60 * 1000
+st_autorefresh(interval=REFRESCO_MS, key="actualizacion_dashboard_12h")
 
 st.title("Dashboard de operación")
 st.caption("Seguimiento del BESS María Elena y generación mensual de proyectos en operación")
@@ -76,12 +76,36 @@ BESS_MPIDS = [
     "MARELENA_023_E8_GSS",
     "MARELENA_023_E11_GSS",
 ]
-ORDEN_PROYECTOS = list(PROYECTOS.keys())
+
+PROYECTOS_PMGD = [
+    "LA QUINTA",
+    "LA PERLA",
+    "LA HUERTA",
+    "CHACAICO",
+    "SANCLEMENTE",
+    "TRILALEO",
+    "COLLANCO",
+]
+
+ORDEN_GRAFICOS = [
+    "MARIA ELENA PFV",
+    "SAN PEDRO III",
+    "DOÑA CARMEN",
+    "CONSOLIDADO PMGDS",
+    "LA QUINTA",
+    "LA PERLA",
+    "LA HUERTA",
+    "CHACAICO",
+    "SANCLEMENTE",
+    "TRILALEO",
+    "COLLANCO",
+]
+
 MESES_CORTOS = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
 MESES_COMPLETOS = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
 
 # =========================================================
-# FUNCIONES GENERALES Y EXCEL
+# FUNCIONES GENERALES
 # =========================================================
 def quitar_tildes(texto):
     return "".join(c for c in unicodedata.normalize("NFD", str(texto)) if unicodedata.category(c) != "Mn")
@@ -119,8 +143,7 @@ def parse_fecha_safe(serie):
 def generar_periodos(fecha_inicio, fecha_fin):
     inicio = datetime.strptime(fecha_inicio, "%Y-%m")
     fin = datetime.strptime(fecha_fin, "%Y-%m")
-    periodos = []
-    actual = inicio
+    periodos, actual = [], inicio
     while actual <= fin:
         periodos.append(actual.strftime("%Y%m"))
         actual = actual.replace(year=actual.year + 1, month=1) if actual.month == 12 else actual.replace(month=actual.month + 1)
@@ -133,7 +156,9 @@ def periodo_a_texto(periodo):
 
 PERIODOS_DISPONIBLES = generar_periodos(FECHA_INICIO, FECHA_FIN)
 
-
+# =========================================================
+# EXCEL
+# =========================================================
 def leer_hoja_excel(hoja, columnas_requeridas):
     if not os.path.exists(ARCHIVO_EXCEL):
         raise FileNotFoundError(f"No se encontró {ARCHIVO_EXCEL}.")
@@ -145,13 +170,13 @@ def leer_hoja_excel(hoja, columnas_requeridas):
     return df[columnas_requeridas].copy()
 
 
-@st.cache_data(ttl=DOCE_HORAS_SEGUNDOS, show_spinner=False)
+@st.cache_data(ttl=CACHE_SEGUNDOS, show_spinner=False)
 def cargar_budgets_bess():
-    requeridas = ["Anio", "Mes", "Budget_Generacion_MWh", "Budget_PPA_MWh"]
-    df = leer_hoja_excel(HOJA_BUDGETS_BESS, requeridas)
-    for c in requeridas:
+    req = ["Anio", "Mes", "Budget_Generacion_MWh", "Budget_PPA_MWh"]
+    df = leer_hoja_excel(HOJA_BUDGETS_BESS, req)
+    for c in req:
         df[c] = convertir_numerico(df[c])
-    df = df.dropna(subset=requeridas)
+    df = df.dropna(subset=req)
     df[["Anio", "Mes"]] = df[["Anio", "Mes"]].astype(int)
     if df.empty:
         raise ValueError("La hoja Budgets no contiene filas válidas.")
@@ -162,13 +187,13 @@ def cargar_budgets_bess():
     return df
 
 
-@st.cache_data(ttl=DOCE_HORAS_SEGUNDOS, show_spinner=False)
+@st.cache_data(ttl=CACHE_SEGUNDOS, show_spinner=False)
 def cargar_consolidado_bess():
-    requeridas = ["Anio", "Mes", "Energia_PPA_MWh", "Energia_Spot_MWh", "Ingreso_PPA_USD", "Ingreso_Spot_USD"]
-    df = leer_hoja_excel(HOJA_CONSOLIDADO_BESS, requeridas)
-    for c in requeridas:
+    req = ["Anio", "Mes", "Energia_PPA_MWh", "Energia_Spot_MWh", "Ingreso_PPA_USD", "Ingreso_Spot_USD"]
+    df = leer_hoja_excel(HOJA_CONSOLIDADO_BESS, req)
+    for c in req:
         df[c] = convertir_numerico(df[c])
-    df = df.dropna(subset=requeridas)
+    df = df.dropna(subset=req)
     df[["Anio", "Mes"]] = df[["Anio", "Mes"]].astype(int)
     if df.duplicated(["Anio", "Mes"]).any():
         raise ValueError("Hay meses duplicados en Consolidado.")
@@ -178,7 +203,7 @@ def cargar_consolidado_bess():
     return df
 
 
-@st.cache_data(ttl=DOCE_HORAS_SEGUNDOS, show_spinner=False)
+@st.cache_data(ttl=CACHE_SEGUNDOS, show_spinner=False)
 def cargar_budgets_proyectos():
     req = ["Anio", "Mes", "Proyecto", "Budget_Generacion_MWh"]
     df = leer_hoja_excel(HOJA_BUDGETS_PROYECTOS, req)
@@ -196,7 +221,7 @@ def cargar_budgets_proyectos():
     return df
 
 
-@st.cache_data(ttl=DOCE_HORAS_SEGUNDOS, show_spinner=False)
+@st.cache_data(ttl=CACHE_SEGUNDOS, show_spinner=False)
 def cargar_consolidado_proyectos():
     req = ["Anio", "Mes", "Proyecto", "Generacion_MWh"]
     df = leer_hoja_excel(HOJA_CONSOLIDADO_PROYECTOS, req)
@@ -217,7 +242,7 @@ def cargar_consolidado_proyectos():
     return df
 
 # =========================================================
-# API PRMTE Y CMG
+# API
 # =========================================================
 def obtener_datos_prmte(periodo, mpid, canal):
     params = {"channelId": canal, "measurePointId": mpid, "period": periodo, "user_key": API_KEY_PRMTE}
@@ -235,8 +260,7 @@ def obtener_datos_prmte(periodo, mpid, canal):
 
 
 def extraer_mediciones(datos, canal):
-    registros = []
-    campo = f"channel{canal}"
+    registros, campo = [], f"channel{canal}"
     if datos is None:
         return registros
     for bloque in datos:
@@ -288,33 +312,31 @@ def obtener_pendientes_proyectos(df_consolidado):
     return {p: [per for per in PERIODOS_DISPONIBLES if (p, per) not in existentes] for p in PROYECTOS}
 
 
-@st.cache_data(ttl=DOCE_HORAS_SEGUNDOS, show_spinner=False)
+@st.cache_data(ttl=CACHE_SEGUNDOS, show_spinner=False)
 def descargar_proyectos_pendientes(pendientes):
     resultados, advertencias = [], []
     for proyecto, periodos in pendientes.items():
-        configuraciones = PROYECTOS[proyecto]
         for periodo in periodos:
-            registros_periodo, correctos = [], 0
-            for conf in configuraciones:
+            registros, correctos = [], 0
+            for conf in PROYECTOS[proyecto]:
                 datos = obtener_datos_prmte(periodo + "012345", conf["mpid"], conf["canal"])
                 regs = extraer_mediciones(datos, conf["canal"])
                 if datos is None or not regs:
                     advertencias.append(f"{proyecto}, {periodo_a_texto(periodo)}: sin datos para {conf['mpid']}.")
                     continue
                 correctos += 1
-                registros_periodo.extend(regs)
-            if correctos != len(configuraciones) or not registros_periodo:
+                registros.extend(regs)
+            if correctos != len(PROYECTOS[proyecto]) or not registros:
                 continue
-            df = pd.DataFrame(registros_periodo)
+            df = pd.DataFrame(registros)
             df["Fecha"] = parse_fecha_safe(df["Fecha"])
             df["Energia_kWh"] = convertir_numerico(df["Energia_kWh"]).fillna(0)
             df = df.dropna(subset=["Fecha"]).groupby("Fecha", as_index=False).agg(Energia_kWh=("Energia_kWh", "sum"))
-            resultados.append({"Anio": int(periodo[:4]), "Mes": int(periodo[4:6]), "Proyecto": proyecto, "Generacion_MWh": df["Energia_kWh"].abs().sum()/1000, "Fuente": "API"})
-    columnas = ["Anio", "Mes", "Proyecto", "Generacion_MWh", "Fuente"]
-    return pd.DataFrame(resultados, columns=columnas), sorted(set(advertencias))
+            resultados.append({"Anio":int(periodo[:4]), "Mes":int(periodo[4:6]), "Proyecto":proyecto, "Generacion_MWh":df["Energia_kWh"].abs().sum()/1000, "Fuente":"API"})
+    return pd.DataFrame(resultados, columns=["Anio","Mes","Proyecto","Generacion_MWh","Fuente"]), sorted(set(advertencias))
 
 
-@st.cache_data(ttl=DOCE_HORAS_SEGUNDOS, show_spinner=False)
+@st.cache_data(ttl=CACHE_SEGUNDOS, show_spinner=False)
 def procesar_bess_api(periodos):
     mensuales, diarios, advertencias = [], [], []
     for periodo in periodos:
@@ -347,9 +369,9 @@ def procesar_bess_api(periodos):
         df["Ingreso_USD"] = df["Energia_MWh"] * df["Precio"]
         df["Fecha_Dia"] = df["Fecha"].dt.normalize()
 
-        diario = df.groupby(["Fecha_Dia", "Tipo"], as_index=False).agg(Energia_MWh=("Energia_MWh", "sum")).pivot_table(index="Fecha_Dia", columns="Tipo", values="Energia_MWh", fill_value=0).reset_index()
+        diario = df.groupby(["Fecha_Dia","Tipo"], as_index=False).agg(Energia_MWh=("Energia_MWh","sum")).pivot_table(index="Fecha_Dia", columns="Tipo", values="Energia_MWh", fill_value=0).reset_index()
         diario.columns.name = None
-        for c in ["PPA", "SPOT"]:
+        for c in ["PPA","SPOT"]:
             if c not in diario.columns:
                 diario[c] = 0
         diario = diario.rename(columns={"PPA":"Energia_PPA_MWh", "SPOT":"Energia_Spot_MWh"})
@@ -364,14 +386,12 @@ def procesar_bess_api(periodos):
         ispot = df.loc[df["Tipo"] == "SPOT", "Ingreso_USD"].sum()
         mensuales.append({"Anio":int(periodo[:4]), "Mes":int(periodo[4:6]), "Energia_PPA_MWh":eppa, "Energia_Spot_MWh":espot, "Energia_Total_MWh":eppa+espot, "Ingreso_PPA_USD":ippa, "Ingreso_Spot_USD":ispot, "Ingreso_Total_USD":ippa+ispot, "Fuente":"API"})
 
-    cols_m = ["Anio","Mes","Energia_PPA_MWh","Energia_Spot_MWh","Energia_Total_MWh","Ingreso_PPA_USD","Ingreso_Spot_USD","Ingreso_Total_USD","Fuente"]
-    cols_d = ["Fecha_Dia","Energia_PPA_MWh","Energia_Spot_MWh","Energia_Total_MWh","Anio","Mes"]
-    df_m = pd.DataFrame(mensuales, columns=cols_m)
-    df_d = pd.concat(diarios, ignore_index=True) if diarios else pd.DataFrame(columns=cols_d)
+    df_m = pd.DataFrame(mensuales, columns=["Anio","Mes","Energia_PPA_MWh","Energia_Spot_MWh","Energia_Total_MWh","Ingreso_PPA_USD","Ingreso_Spot_USD","Ingreso_Total_USD","Fuente"])
+    df_d = pd.concat(diarios, ignore_index=True) if diarios else pd.DataFrame(columns=["Fecha_Dia","Energia_PPA_MWh","Energia_Spot_MWh","Energia_Total_MWh","Anio","Mes"])
     return df_m, df_d, sorted(set(advertencias))
 
 # =========================================================
-# CARGA, CONSULTAS Y UNIONES
+# CARGA Y UNIONES
 # =========================================================
 try:
     df_budgets_bess = cargar_budgets_bess()
@@ -383,13 +403,12 @@ except Exception as error:
     st.info(str(error))
     st.stop()
 
-pendientes_proyectos = obtener_pendientes_proyectos(df_consolidado_proyectos)
 with st.spinner("Consultando meses pendientes de proyectos..."):
-    df_proyectos_api, advertencias_proyectos = descargar_proyectos_pendientes(pendientes_proyectos)
+    df_proyectos_api, advertencias_proyectos = descargar_proyectos_pendientes(obtener_pendientes_proyectos(df_consolidado_proyectos))
 
 fuentes_p = [df_consolidado_proyectos] + ([df_proyectos_api] if not df_proyectos_api.empty else [])
 df_proyectos_final = pd.concat(fuentes_p, ignore_index=True)
-df_proyectos_final["Prioridad"] = df_proyectos_final["Fuente"].map({"API":1, "Excel consolidado":2}).fillna(2)
+df_proyectos_final["Prioridad"] = df_proyectos_final["Fuente"].map({"API":1,"Excel consolidado":2}).fillna(2)
 df_proyectos_final = df_proyectos_final.sort_values("Prioridad").drop_duplicates(["Anio","Mes","Proyecto"], keep="last").drop(columns="Prioridad").sort_values(["Proyecto","Anio","Mes"])
 
 periodos_bess_excel = {f"{int(f.Anio):04d}{int(f.Mes):02d}" for f in df_consolidado_bess.itertuples()}
@@ -399,7 +418,7 @@ with st.spinner("Consultando meses pendientes del BESS..."):
 
 fuentes_b = [df_consolidado_bess] + ([df_bess_api] if not df_bess_api.empty else [])
 df_bess_final = pd.concat(fuentes_b, ignore_index=True)
-df_bess_final["Prioridad"] = df_bess_final["Fuente"].map({"API":1, "Excel consolidado":2}).fillna(2)
+df_bess_final["Prioridad"] = df_bess_final["Fuente"].map({"API":1,"Excel consolidado":2}).fillna(2)
 df_bess_final = df_bess_final.sort_values("Prioridad").drop_duplicates(["Anio","Mes"], keep="last").drop(columns="Prioridad").sort_values(["Anio","Mes"])
 
 advertencias = sorted(set(advertencias_proyectos + advertencias_bess))
@@ -410,47 +429,38 @@ if advertencias:
             st.write(f"- {a}")
 
 st.sidebar.header("Filtros")
-anio_seleccionado = st.sidebar.selectbox("Año", options=[ANIO_OPERACIONAL], index=0)
+anio_seleccionado = st.sidebar.selectbox("Año", [ANIO_OPERACIONAL], index=0)
 
 # =========================================================
-# BESS: GRAFICO DIARIO AL INICIO
+# BESS
 # =========================================================
 st.header("BESS María Elena")
 st.subheader("Distribución diaria de energía del BESS")
-
 if df_bess_diario_api.empty:
     st.info("No hay información diaria disponible desde la API. Los meses del Excel contienen información mensual.")
 else:
-    opciones = [(int(f.Anio), int(f.Mes)) for f in df_bess_diario_api[["Anio","Mes"]].drop_duplicates().sort_values(["Anio","Mes"], ascending=False).itertuples()]
-    periodo_diario = st.selectbox("Mes para gráfico diario del BESS", opciones, format_func=lambda x: f"{MESES_COMPLETOS[x[1]]} {x[0]}", key="periodo_diario_bess")
-    ad, md = periodo_diario
-    diario_mes = df_bess_diario_api[(df_bess_diario_api["Anio"] == ad) & (df_bess_diario_api["Mes"] == md)].copy()
-    primer = pd.Timestamp(ad, md, 1)
-    ultimo = pd.Timestamp(ad, md, calendar.monthrange(ad, md)[1])
+    opciones = [(int(f.Anio),int(f.Mes)) for f in df_bess_diario_api[["Anio","Mes"]].drop_duplicates().sort_values(["Anio","Mes"], ascending=False).itertuples()]
+    ad, md = st.selectbox("Mes para gráfico diario del BESS", opciones, format_func=lambda x:f"{MESES_COMPLETOS[x[1]]} {x[0]}", key="periodo_diario_bess")
+    diario_mes = df_bess_diario_api[(df_bess_diario_api["Anio"]==ad)&(df_bess_diario_api["Mes"]==md)].copy()
+    primer = pd.Timestamp(ad,md,1)
+    ultimo = pd.Timestamp(ad,md,calendar.monthrange(ad,md)[1])
     hoy_n = pd.Timestamp.now().normalize()
     if ad == hoy_n.year and md == hoy_n.month:
-        ultimo = min(ultimo, hoy_n)
-    calendario_df = pd.DataFrame({"Fecha_Dia": pd.date_range(primer, ultimo, freq="D")})
-    diario_mes = calendario_df.merge(diario_mes[["Fecha_Dia","Energia_PPA_MWh","Energia_Spot_MWh","Energia_Total_MWh"]], on="Fecha_Dia", how="left").fillna(0)
-    ancho = 0.40 * 24 * 60 * 60 * 1000
+        ultimo = min(ultimo,hoy_n)
+    diario_mes = pd.DataFrame({"Fecha_Dia":pd.date_range(primer,ultimo,freq="D")}).merge(diario_mes[["Fecha_Dia","Energia_PPA_MWh","Energia_Spot_MWh","Energia_Total_MWh"]], on="Fecha_Dia", how="left").fillna(0)
+    ancho = 0.40*24*60*60*1000
     fig_d = go.Figure()
-    fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_PPA_MWh"], name="PPA real", marker_color="#1565C0", width=ancho, hovertemplate="<b>%{x|%d-%m-%Y}</b><br>PPA: %{y:,.2f} MWh<extra></extra>")
-    fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_Spot_MWh"], name="Spot real", marker_color="#65BDEB", width=ancho, hovertemplate="<b>%{x|%d-%m-%Y}</b><br>Spot: %{y:,.2f} MWh<extra></extra>")
-    fig_d.update_layout(title=f"Inyección diaria BESS, {MESES_COMPLETOS[md]} {ad}", barmode="stack", xaxis_title="Día del mes", yaxis_title="Energía [MWh]", hovermode="x unified", height=500, legend=dict(orientation="h", y=1.02))
-    fig_d.update_xaxes(dtick=24*60*60*1000, tickformat="%d", range=[primer-pd.Timedelta(hours=12), ultimo+pd.Timedelta(hours=12)], showgrid=False)
-    fig_d.update_yaxes(rangemode="tozero", gridcolor="rgba(140,140,140,0.22)")
+    fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_PPA_MWh"], name="PPA real", marker_color="#1565C0", width=ancho)
+    fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_Spot_MWh"], name="Spot real", marker_color="#65BDEB", width=ancho)
+    fig_d.update_layout(title=f"Inyección diaria BESS, {MESES_COMPLETOS[md]} {ad}", barmode="stack", xaxis_title="Día", yaxis_title="Energía [MWh]", hovermode="x unified", height=500, legend=dict(orientation="h", y=1.02))
+    fig_d.update_xaxes(dtick=24*60*60*1000, tickformat="%d", range=[primer-pd.Timedelta(hours=12),ultimo+pd.Timedelta(hours=12)], showgrid=False)
     st.plotly_chart(fig_d, use_container_width=True, key="grafico_diario_bess")
 
-# =========================================================
-# BESS: INDICADORES Y CONSOLIDADO ANUAL
-# =========================================================
-bess_anio = df_bess_final[df_bess_final["Anio"] == anio_seleccionado].copy()
-if bess_anio.empty:
-    st.info("No hay información disponible del BESS.")
-else:
-    meses_bess = sorted(bess_anio["Mes"].astype(int).unique().tolist(), reverse=True)
-    mes_bess = st.selectbox("Mes para indicadores BESS", meses_bess, format_func=lambda m: MESES_COMPLETOS[m])
-    fila = bess_anio[bess_anio["Mes"] == mes_bess].iloc[0]
+bess_anio = df_bess_final[df_bess_final["Anio"]==anio_seleccionado].copy()
+if not bess_anio.empty:
+    meses_bess = sorted(bess_anio["Mes"].astype(int).unique(), reverse=True)
+    mes_bess = st.selectbox("Mes para indicadores BESS", meses_bess, format_func=lambda m:MESES_COMPLETOS[m])
+    fila = bess_anio[bess_anio["Mes"]==mes_bess].iloc[0]
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("Inyección total del mes", f"{fila['Energia_Total_MWh']:,.1f} MWh")
     c2.metric("Energía PPA del mes", f"{fila['Energia_PPA_MWh']:,.1f} MWh")
@@ -458,79 +468,93 @@ else:
     c4.metric("Ingreso del mes", f"USD {fila['Ingreso_Total_USD']:,.0f}")
     st.caption(f"Fuente: {fila['Fuente']}. Precio PPA: USD {PRECIO_PPA:,.2f}/MWh.")
 
-con_b = pd.DataFrame({"Mes":range(1,13)}).merge(bess_anio, on="Mes", how="left")
-bud_b = df_budgets_bess[df_budgets_bess["Anio"] == anio_seleccionado]
-con_b = con_b.merge(bud_b[["Mes","Budget_Generacion_MWh","Budget_PPA_MWh"]], on="Mes", how="left")
+con_b = pd.DataFrame({"Mes":range(1,13)}).merge(bess_anio,on="Mes",how="left")
+bud_b = df_budgets_bess[df_budgets_bess["Anio"]==anio_seleccionado]
+con_b = con_b.merge(bud_b[["Mes","Budget_Generacion_MWh","Budget_PPA_MWh"]],on="Mes",how="left")
 for c in ["Energia_PPA_MWh","Energia_Spot_MWh","Energia_Total_MWh","Ingreso_Total_USD"]:
     if c not in con_b.columns:
-        con_b[c] = 0
-    con_b[c] = con_b[c].fillna(0)
-con_b["Nombre_Mes"] = con_b["Mes"].map(MESES_CORTOS)
-fig_b = go.Figure()
-fig_b.add_bar(x=con_b["Nombre_Mes"], y=con_b["Energia_PPA_MWh"], name="PPA real", marker_color="#1565C0", width=0.58)
-fig_b.add_bar(x=con_b["Nombre_Mes"], y=con_b["Energia_Spot_MWh"], name="Spot real", marker_color="#65BDEB", width=0.58)
-fig_b.add_scatter(x=con_b["Nombre_Mes"], y=con_b["Budget_Generacion_MWh"], name="Budget generación", mode="lines+markers", line=dict(color="#0B3D91", width=3))
-fig_b.add_scatter(x=con_b["Nombre_Mes"], y=con_b["Budget_PPA_MWh"], name="Budget PPA", mode="lines+markers", line=dict(color="#2EAD5B", width=3))
-fig_b.update_layout(title="Consolidado anual BESS", barmode="stack", xaxis_title="Mes", yaxis_title="Energía [MWh]", hovermode="x unified", height=560, legend=dict(orientation="h", y=1.02))
-st.plotly_chart(fig_b, use_container_width=True)
+        con_b[c]=0
+    con_b[c]=con_b[c].fillna(0)
+con_b["Nombre_Mes"]=con_b["Mes"].map(MESES_CORTOS)
+fig_b=go.Figure()
+fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_PPA_MWh"],name="PPA real",marker_color="#1565C0",width=0.58)
+fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_Spot_MWh"],name="Spot real",marker_color="#65BDEB",width=0.58)
+fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_Generacion_MWh"],name="Budget generación",mode="lines+markers",line=dict(color="#0B3D91",width=3))
+fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_PPA_MWh"],name="Budget PPA",mode="lines+markers",line=dict(color="#2EAD5B",width=3))
+fig_b.update_layout(title="Consolidado anual BESS",barmode="stack",xaxis_title="Mes",yaxis_title="Energía [MWh]",hovermode="x unified",height=560,legend=dict(orientation="h",y=1.02))
+st.plotly_chart(fig_b,use_container_width=True)
 
 with st.expander("Ver acumulados del BESS"):
-    a1,a2,a3,a4 = st.columns(4)
-    a1.metric("Inyección acumulada", f"{bess_anio['Energia_Total_MWh'].sum():,.1f} MWh")
-    a2.metric("PPA acumulado", f"{bess_anio['Energia_PPA_MWh'].sum():,.1f} MWh")
-    a3.metric("Spot acumulado", f"{bess_anio['Energia_Spot_MWh'].sum():,.1f} MWh")
-    a4.metric("Ingreso acumulado", f"USD {bess_anio['Ingreso_Total_USD'].sum():,.0f}")
+    a1,a2,a3,a4=st.columns(4)
+    a1.metric("Inyección acumulada",f"{bess_anio['Energia_Total_MWh'].sum():,.1f} MWh")
+    a2.metric("PPA acumulado",f"{bess_anio['Energia_PPA_MWh'].sum():,.1f} MWh")
+    a3.metric("Spot acumulado",f"{bess_anio['Energia_Spot_MWh'].sum():,.1f} MWh")
+    a4.metric("Ingreso acumulado",f"USD {bess_anio['Ingreso_Total_USD'].sum():,.0f}")
 
 # =========================================================
-# PROYECTOS: GRAFICOS PEQUENOS Y TOTAL
+# PROYECTOS Y CONSOLIDADO PMGDS
 # =========================================================
 st.header("Generación mensual de proyectos")
 st.caption("Cada gráfico utiliza el Excel para los meses consolidados y la API para los meses pendientes.")
-proyectos_anio = df_proyectos_final[df_proyectos_final["Anio"] == anio_seleccionado].copy()
-budgets_proyectos_anio = df_budgets_proyectos[df_budgets_proyectos["Anio"] == anio_seleccionado].copy()
-columnas = st.columns(2)
-for i, proyecto in enumerate(ORDEN_PROYECTOS):
-    datos = proyectos_anio[proyectos_anio["Proyecto"] == proyecto][["Mes","Generacion_MWh","Fuente"]]
-    bud = budgets_proyectos_anio[budgets_proyectos_anio["Proyecto"] == proyecto][["Mes","Budget_Generacion_MWh"]]
-    con = pd.DataFrame({"Mes":range(1,13)}).merge(datos, on="Mes", how="left").merge(bud, on="Mes", how="left")
-    con["Generacion_MWh"] = con["Generacion_MWh"].fillna(0)
-    con["Nombre_Mes"] = con["Mes"].map(MESES_CORTOS)
-    fig = go.Figure()
-    fig.add_bar(x=con["Nombre_Mes"], y=con["Generacion_MWh"], name="Generación", marker_color="#2176C7", width=0.52)
-    fig.add_scatter(x=con["Nombre_Mes"], y=con["Budget_Generacion_MWh"], name="Budget", mode="lines+markers", line=dict(color="#F05A28", width=2), marker=dict(size=5))
-    fig.update_layout(title=proyecto, height=330, margin=dict(l=35,r=15,t=50,b=35), showlegend=(i==0), legend=dict(orientation="h", y=1.02), hovermode="x unified", yaxis_title="MWh", bargap=0.40)
-    fig.update_yaxes(rangemode="tozero", gridcolor="rgba(140,140,140,0.18)")
-    with columnas[i % 2]:
-        st.plotly_chart(fig, use_container_width=True, key=f"grafico_{proyecto}")
+proyectos_anio=df_proyectos_final[df_proyectos_final["Anio"]==anio_seleccionado].copy()
+budgets_proyectos_anio=df_budgets_proyectos[df_budgets_proyectos["Anio"]==anio_seleccionado].copy()
+columnas=st.columns(2)
 
-gen_total = proyectos_anio.groupby("Mes", as_index=False).agg(Generacion_Total_MWh=("Generacion_MWh","sum"))
-bud_total = budgets_proyectos_anio.groupby("Mes", as_index=False).agg(Budget_Total_MWh=("Budget_Generacion_MWh","sum"))
-total = pd.DataFrame({"Mes":range(1,13)}).merge(gen_total,on="Mes",how="left").merge(bud_total,on="Mes",how="left")
-total["Generacion_Total_MWh"] = total["Generacion_Total_MWh"].fillna(0)
-total["Nombre_Mes"] = total["Mes"].map(MESES_CORTOS)
+for i, elemento in enumerate(ORDEN_GRAFICOS):
+    if elemento == "CONSOLIDADO PMGDS":
+        datos = proyectos_anio[proyectos_anio["Proyecto"].isin(PROYECTOS_PMGD)].groupby("Mes",as_index=False).agg(Generacion_MWh=("Generacion_MWh","sum"))
+        bud = budgets_proyectos_anio[budgets_proyectos_anio["Proyecto"].isin(PROYECTOS_PMGD)].groupby("Mes",as_index=False).agg(Budget_Generacion_MWh=("Budget_Generacion_MWh","sum"))
+        titulo = "Consolidado PMGDs"
+        color_barra = "#1976D2"
+    else:
+        datos = proyectos_anio[proyectos_anio["Proyecto"]==elemento][["Mes","Generacion_MWh"]]
+        bud = budgets_proyectos_anio[budgets_proyectos_anio["Proyecto"]==elemento][["Mes","Budget_Generacion_MWh"]]
+        titulo = elemento
+        color_barra = "#2176C7"
+
+    con=pd.DataFrame({"Mes":range(1,13)}).merge(datos,on="Mes",how="left").merge(bud,on="Mes",how="left")
+    con["Generacion_MWh"]=con["Generacion_MWh"].fillna(0)
+    con["Nombre_Mes"]=con["Mes"].map(MESES_CORTOS)
+    fig=go.Figure()
+    fig.add_bar(x=con["Nombre_Mes"],y=con["Generacion_MWh"],name="Generación",marker_color=color_barra,width=0.52)
+    fig.add_scatter(x=con["Nombre_Mes"],y=con["Budget_Generacion_MWh"],name="Budget",mode="lines+markers",line=dict(color="#F05A28",width=2),marker=dict(size=5))
+    fig.update_layout(title=titulo,height=330,margin=dict(l=35,r=15,t=50,b=35),showlegend=(i==0),legend=dict(orientation="h",y=1.02),hovermode="x unified",yaxis_title="MWh",bargap=0.40)
+    fig.update_yaxes(rangemode="tozero",gridcolor="rgba(140,140,140,0.18)")
+    clave=quitar_tildes(elemento).lower().replace(" ","_")
+    with columnas[i%2]:
+        st.plotly_chart(fig,use_container_width=True,key=f"grafico_{clave}")
+
+# =========================================================
+# TOTAL PROYECTOS
+# =========================================================
+gen_total=proyectos_anio.groupby("Mes",as_index=False).agg(Generacion_Total_MWh=("Generacion_MWh","sum"))
+bud_total=budgets_proyectos_anio.groupby("Mes",as_index=False).agg(Budget_Total_MWh=("Budget_Generacion_MWh","sum"))
+total=pd.DataFrame({"Mes":range(1,13)}).merge(gen_total,on="Mes",how="left").merge(bud_total,on="Mes",how="left")
+total["Generacion_Total_MWh"]=total["Generacion_Total_MWh"].fillna(0)
+total["Nombre_Mes"]=total["Mes"].map(MESES_CORTOS)
 st.subheader("Generación mensual total de proyectos")
-fig_t = go.Figure()
-fig_t.add_bar(x=total["Nombre_Mes"], y=total["Generacion_Total_MWh"], name="Generación real total", marker_color="#1565C0", width=0.38, offsetgroup="real")
-fig_t.add_bar(x=total["Nombre_Mes"], y=total["Budget_Total_MWh"], name="Budget total", marker_color="#E58A21", width=0.38, offsetgroup="budget")
-fig_t.update_layout(barmode="group", xaxis_title="Mes", yaxis_title="Generación [MWh]", height=520, hovermode="x unified", legend=dict(orientation="h", y=1.02))
-st.plotly_chart(fig_t, use_container_width=True)
+fig_t=go.Figure()
+fig_t.add_bar(x=total["Nombre_Mes"],y=total["Generacion_Total_MWh"],name="Generación real total",marker_color="#1565C0",width=0.38,offsetgroup="real")
+fig_t.add_bar(x=total["Nombre_Mes"],y=total["Budget_Total_MWh"],name="Budget total",marker_color="#E58A21",width=0.38,offsetgroup="budget")
+fig_t.update_layout(barmode="group",xaxis_title="Mes",yaxis_title="Generación [MWh]",height=520,hovermode="x unified",legend=dict(orientation="h",y=1.02))
+st.plotly_chart(fig_t,use_container_width=True)
 
-meses_con_gen = total[total["Generacion_Total_MWh"] > 0]
+meses_con_gen=total[total["Generacion_Total_MWh"]>0]
 if not meses_con_gen.empty:
-    ultimo_mes = int(meses_con_gen["Mes"].max())
-    fila = total[total["Mes"] == ultimo_mes].iloc[0]
-    gen_acum = total.loc[total["Mes"] <= ultimo_mes, "Generacion_Total_MWh"].sum()
-    bud_acum = total.loc[total["Mes"] <= ultimo_mes, "Budget_Total_MWh"].fillna(0).sum()
-    t1,t2,t3,t4 = st.columns(4)
-    t1.metric(f"Generación total {MESES_COMPLETOS[ultimo_mes]}", f"{fila['Generacion_Total_MWh']:,.1f} MWh")
-    t2.metric(f"Budget total {MESES_COMPLETOS[ultimo_mes]}", f"{fila['Budget_Total_MWh']:,.1f} MWh" if pd.notna(fila["Budget_Total_MWh"]) else "Sin budget")
-    t3.metric("Generación acumulada", f"{gen_acum:,.1f} MWh")
-    t4.metric("Diferencia acumulada vs budget", f"{gen_acum-bud_acum:,.1f} MWh")
+    ultimo_mes=int(meses_con_gen["Mes"].max())
+    fila=total[total["Mes"]==ultimo_mes].iloc[0]
+    gen_acum=total.loc[total["Mes"]<=ultimo_mes,"Generacion_Total_MWh"].sum()
+    bud_acum=total.loc[total["Mes"]<=ultimo_mes,"Budget_Total_MWh"].fillna(0).sum()
+    t1,t2,t3,t4=st.columns(4)
+    t1.metric(f"Generación total {MESES_COMPLETOS[ultimo_mes]}",f"{fila['Generacion_Total_MWh']:,.1f} MWh")
+    t2.metric(f"Budget total {MESES_COMPLETOS[ultimo_mes]}",f"{fila['Budget_Total_MWh']:,.1f} MWh" if pd.notna(fila["Budget_Total_MWh"]) else "Sin budget")
+    t3.metric("Generación acumulada",f"{gen_acum:,.1f} MWh")
+    t4.metric("Diferencia acumulada vs budget",f"{gen_acum-bud_acum:,.1f} MWh")
 
 with st.expander("Ver fuentes utilizadas por proyecto"):
-    tabla = proyectos_anio[["Proyecto","Mes","Fuente"]].sort_values(["Proyecto","Mes"]).copy()
-    tabla["Mes"] = tabla["Mes"].map(MESES_COMPLETOS)
-    st.dataframe(tabla, use_container_width=True, hide_index=True)
+    tabla=proyectos_anio[["Proyecto","Mes","Fuente"]].sort_values(["Proyecto","Mes"]).copy()
+    tabla["Mes"]=tabla["Mes"].map(MESES_COMPLETOS)
+    st.dataframe(tabla,use_container_width=True,hide_index=True)
 
 st.caption(f"Dashboard procesado: {datetime.now():%d-%m-%Y %H:%M:%S}")
 st.caption("Las consultas a las API y la caché se renuevan cada 12 horas.")
