@@ -580,7 +580,12 @@ st.plotly_chart(
     fig_b,
     use_container_width=True
 )
-st.plotly_chart(fig_b,use_container_width=True)
+Python
+st.plotly_chart(
+fig_b,
+use_container_width=True,
+key="grafico_consolidado_anual_bess"
+)
 
 with st.expander("Ver acumulados del BESS"):
     a1,a2,a3,a4=st.columns(4)
