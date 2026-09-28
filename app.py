@@ -11,89 +11,9 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # =========================================================
-# CONFIGURACION GENERAL E IDENTIDAD ATLANTICA
+# CONFIGURACION GENERAL
 # =========================================================
-st.set_page_config(
-    page_title="Dashboard de Operación",
-    page_icon="⚡",
-    layout="wide",
-)
-
-COLOR_VERDE = "#005F4F"
-COLOR_AZUL = "#004F5F"
-COLOR_ACENTO = "#2D7F73"
-COLOR_ACENTO_OSCURO = "#005F4F"
-COLOR_FONDO = "#DCEBE7"
-COLOR_FONDO_SECUNDARIO = "#C8DEDA"
-COLOR_BLANCO = "#FFFFFF"
-COLOR_TEXTO = "#183430"
-COLOR_TEXTO_SECUNDARIO = "#526B66"
-COLOR_BORDE = "rgba(0,95,79,0.20)"
-COLOR_REJILLA = "rgba(0,95,79,0.12)"
-
-st.markdown(
-    """
-    <style>
-    .stApp { background: linear-gradient(180deg, #DCEBE7 0%, #EEF6F3 55%, #DCEBE7 100%); }
-    .block-container { padding-top: 1.7rem; padding-bottom: 3rem; }
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #005F4F 0%, #004F5F 100%);
-        border-right: 3px solid #004F5F;
-    }
-    h1 { color: #004F5F; font-weight: 800; letter-spacing: -0.02em; }
-    h2 { color: #005F4F; font-weight: 750; border-bottom: 2px solid rgba(0,95,79,0.14); padding-bottom: .35rem; }
-    h3 { color: #004F5F; font-weight: 700; }
-    p, label, .stMarkdown { color: #183430; }
-    div[data-testid="stMetric"] {
-        background-color: #FFFFFF;
-        border: 1px solid rgba(0,95,79,0.20);
-        border-left: 6px solid #005F4F;
-        border-radius: 12px;
-        padding: 15px 17px;
-        box-shadow: 0 3px 12px rgba(0,79,95,0.08);
-        min-height: 112px;
-    }
-    div[data-testid="stMetricLabel"] { color: #004F5F; font-weight: 650; }
-    div[data-testid="stMetricValue"] { color: #005F4F; font-weight: 800; }
-    div[data-testid="stMetricDelta"] { color: #004F5F; }
-    div[data-testid="stExpander"] {
-        background-color: #FFFFFF;
-        border: 1px solid rgba(0,95,79,0.18);
-        border-radius: 10px;
-        box-shadow: 0 2px 8px rgba(0,79,95,0.05);
-    }
-    div[data-baseweb="select"] > div {
-        background-color: #FFFFFF;
-        border-color: rgba(0,95,79,0.30);
-        border-radius: 8px;
-    }
-    div[data-testid="stDataFrame"] {
-        background-color: #FFFFFF;
-        border: 1px solid rgba(0,95,79,0.18);
-        border-radius: 10px;
-        overflow: hidden;
-    }
-    div[data-testid="stAlert"] { border-radius: 10px; }
-    a { color: #005F4F; }
-    a:hover { color: #004F5F; }
-
-    section[data-testid="stSidebar"] * { color: #FFFFFF !important; }
-    section[data-testid="stSidebar"] div[data-baseweb="select"] > div {
-        background-color: rgba(255,255,255,0.14) !important;
-        border: 1px solid rgba(255,255,255,0.38) !important;
-    }
-    section[data-testid="stSidebar"] svg { fill: #FFFFFF !important; }
-    div[data-testid="stPlotlyChart"] {
-        background-color: #FFFFFF;
-        border: 1px solid rgba(0,95,79,0.18);
-        border-radius: 12px;
-        padding: 8px;
-        box-shadow: 0 3px 12px rgba(0,79,95,0.08);
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.set_page_config(page_title="Dashboard de Operación", page_icon="⚡", layout="wide")
 
 CACHE_SEGUNDOS = 12 * 60 * 60
 REFRESCO_MS = 12 * 60 * 60 * 1000
@@ -158,45 +78,31 @@ BESS_MPIDS = [
 ]
 
 PROYECTOS_PMGD = [
-    "LA QUINTA", "LA PERLA", "LA HUERTA", "CHACAICO",
-    "SANCLEMENTE", "TRILALEO", "COLLANCO",
+    "LA QUINTA",
+    "LA PERLA",
+    "LA HUERTA",
+    "CHACAICO",
+    "SANCLEMENTE",
+    "TRILALEO",
+    "COLLANCO",
 ]
 
 ORDEN_GRAFICOS = [
-    "MARIA ELENA PFV", "SAN PEDRO III", "DOÑA CARMEN",
-    "CONSOLIDADO PMGDS", "LA QUINTA", "LA PERLA", "LA HUERTA",
-    "CHACAICO", "SANCLEMENTE", "TRILALEO", "COLLANCO",
+    "MARIA ELENA PFV",
+    "SAN PEDRO III",
+    "DOÑA CARMEN",
+    "CONSOLIDADO PMGDS",
+    "LA QUINTA",
+    "LA PERLA",
+    "LA HUERTA",
+    "CHACAICO",
+    "SANCLEMENTE",
+    "TRILALEO",
+    "COLLANCO",
 ]
 
 MESES_CORTOS = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
 MESES_COMPLETOS = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
-
-# =========================================================
-# ESTILO DE GRAFICOS
-# =========================================================
-def aplicar_estilo_atlantica(figura, altura=None, mostrar_leyenda=True):
-    figura.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor=COLOR_BLANCO,
-        font=dict(family="Arial, sans-serif", color=COLOR_TEXTO),
-        title_font=dict(color=COLOR_AZUL, size=18),
-        showlegend=mostrar_leyenda,
-        hoverlabel=dict(bgcolor=COLOR_BLANCO, bordercolor=COLOR_VERDE, font_color=COLOR_TEXTO),
-    )
-    if altura is not None:
-        figura.update_layout(height=altura)
-    figura.update_xaxes(
-        showline=True, linecolor=COLOR_BORDE,
-        tickfont=dict(color=COLOR_TEXTO_SECUNDARIO),
-        title_font=dict(color=COLOR_AZUL), gridcolor=COLOR_REJILLA,
-    )
-    figura.update_yaxes(
-        showline=True, linecolor=COLOR_BORDE,
-        tickfont=dict(color=COLOR_TEXTO_SECUNDARIO),
-        title_font=dict(color=COLOR_AZUL), gridcolor=COLOR_REJILLA,
-        zerolinecolor=COLOR_BORDE,
-    )
-    return figura
 
 # =========================================================
 # FUNCIONES GENERALES
@@ -544,11 +450,10 @@ else:
     diario_mes = pd.DataFrame({"Fecha_Dia":pd.date_range(primer,ultimo,freq="D")}).merge(diario_mes[["Fecha_Dia","Energia_PPA_MWh","Energia_Spot_MWh","Energia_Total_MWh"]], on="Fecha_Dia", how="left").fillna(0)
     ancho = 0.40*24*60*60*1000
     fig_d = go.Figure()
-    fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_PPA_MWh"], name="PPA real", marker_color=COLOR_VERDE, marker_line_color=COLOR_AZUL, marker_line_width=.4, width=ancho)
-    fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_Spot_MWh"], name="Spot real", marker_color=COLOR_VERDE, marker_line_color=COLOR_AZUL, marker_line_width=.4, marker_pattern_shape="/", opacity=0.70, width=ancho)
-    fig_d.update_layout(title=f"Inyección diaria BESS, {MESES_COMPLETOS[md]} {ad}", barmode="stack", xaxis_title="Día", yaxis_title="Energía [MWh]", hovermode="x unified", legend=dict(orientation="h", y=1.02))
+    fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_PPA_MWh"], name="PPA real", marker_color="#1565C0", width=ancho)
+    fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_Spot_MWh"], name="Spot real", marker_color="#65BDEB", width=ancho)
+    fig_d.update_layout(title=f"Inyección diaria BESS, {MESES_COMPLETOS[md]} {ad}", barmode="stack", xaxis_title="Día", yaxis_title="Energía [MWh]", hovermode="x unified", height=500, legend=dict(orientation="h", y=1.02))
     fig_d.update_xaxes(dtick=24*60*60*1000, tickformat="%d", range=[primer-pd.Timedelta(hours=12),ultimo+pd.Timedelta(hours=12)], showgrid=False)
-    aplicar_estilo_atlantica(fig_d, altura=500)
     st.plotly_chart(fig_d, use_container_width=True, key="grafico_diario_bess")
 
 bess_anio = df_bess_final[df_bess_final["Anio"]==anio_seleccionado].copy()
@@ -572,12 +477,11 @@ for c in ["Energia_PPA_MWh","Energia_Spot_MWh","Energia_Total_MWh","Ingreso_Tota
     con_b[c]=con_b[c].fillna(0)
 con_b["Nombre_Mes"]=con_b["Mes"].map(MESES_CORTOS)
 fig_b=go.Figure()
-fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_PPA_MWh"],name="PPA real",marker_color=COLOR_VERDE,marker_line_color=COLOR_AZUL,marker_line_width=.4,width=.58)
-fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_Spot_MWh"],name="Spot real",marker_color=COLOR_VERDE,marker_line_color=COLOR_AZUL,marker_line_width=.4,marker_pattern_shape="/",opacity=.70,width=.58)
-fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_Generacion_MWh"],name="Budget generación",mode="lines+markers",line=dict(color=COLOR_AZUL,width=3),marker=dict(color=COLOR_AZUL,size=8))
-fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_PPA_MWh"],name="Budget PPA",mode="lines+markers",line=dict(color=COLOR_VERDE,width=3,dash="dot"),marker=dict(color=COLOR_VERDE,size=8,symbol="diamond"))
-fig_b.update_layout(title="Consolidado anual BESS",barmode="stack",xaxis_title="Mes",yaxis_title="Energía [MWh]",hovermode="x unified",legend=dict(orientation="h",y=1.02))
-aplicar_estilo_atlantica(fig_b, altura=560)
+fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_PPA_MWh"],name="PPA real",marker_color="#1565C0",width=0.58)
+fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_Spot_MWh"],name="Spot real",marker_color="#65BDEB",width=0.58)
+fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_Generacion_MWh"],name="Budget generación",mode="lines+markers",line=dict(color="#0B3D91",width=3))
+fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_PPA_MWh"],name="Budget PPA",mode="lines+markers",line=dict(color="#2EAD5B",width=3))
+fig_b.update_layout(title="Consolidado anual BESS",barmode="stack",xaxis_title="Mes",yaxis_title="Energía [MWh]",hovermode="x unified",height=560,legend=dict(orientation="h",y=1.02))
 st.plotly_chart(fig_b,use_container_width=True)
 
 with st.expander("Ver acumulados del BESS"):
@@ -598,26 +502,24 @@ columnas=st.columns(2)
 
 for i, elemento in enumerate(ORDEN_GRAFICOS):
     if elemento == "CONSOLIDADO PMGDS":
-        datos=proyectos_anio[proyectos_anio["Proyecto"].isin(PROYECTOS_PMGD)].groupby("Mes",as_index=False).agg(Generacion_MWh=("Generacion_MWh","sum"))
-        bud=budgets_proyectos_anio[budgets_proyectos_anio["Proyecto"].isin(PROYECTOS_PMGD)].groupby("Mes",as_index=False).agg(Budget_Generacion_MWh=("Budget_Generacion_MWh","sum"))
-        titulo="Consolidado PMGDs"
-        color_barra=COLOR_VERDE
-        color_borde=COLOR_AZUL
+        datos = proyectos_anio[proyectos_anio["Proyecto"].isin(PROYECTOS_PMGD)].groupby("Mes",as_index=False).agg(Generacion_MWh=("Generacion_MWh","sum"))
+        bud = budgets_proyectos_anio[budgets_proyectos_anio["Proyecto"].isin(PROYECTOS_PMGD)].groupby("Mes",as_index=False).agg(Budget_Generacion_MWh=("Budget_Generacion_MWh","sum"))
+        titulo = "Consolidado PMGDs"
+        color_barra = "#1976D2"
     else:
-        datos=proyectos_anio[proyectos_anio["Proyecto"]==elemento][["Mes","Generacion_MWh"]]
-        bud=budgets_proyectos_anio[budgets_proyectos_anio["Proyecto"]==elemento][["Mes","Budget_Generacion_MWh"]]
-        titulo=elemento
-        color_barra=COLOR_VERDE
-        color_borde=COLOR_AZUL
+        datos = proyectos_anio[proyectos_anio["Proyecto"]==elemento][["Mes","Generacion_MWh"]]
+        bud = budgets_proyectos_anio[budgets_proyectos_anio["Proyecto"]==elemento][["Mes","Budget_Generacion_MWh"]]
+        titulo = elemento
+        color_barra = "#2176C7"
 
     con=pd.DataFrame({"Mes":range(1,13)}).merge(datos,on="Mes",how="left").merge(bud,on="Mes",how="left")
     con["Generacion_MWh"]=con["Generacion_MWh"].fillna(0)
     con["Nombre_Mes"]=con["Mes"].map(MESES_CORTOS)
     fig=go.Figure()
-    fig.add_bar(x=con["Nombre_Mes"],y=con["Generacion_MWh"],name="Generación",marker_color=color_barra,marker_line_color=color_borde,marker_line_width=.35,width=.52)
-    fig.add_scatter(x=con["Nombre_Mes"],y=con["Budget_Generacion_MWh"],name="Budget",mode="lines+markers",line=dict(color=COLOR_AZUL,width=2.5),marker=dict(color=COLOR_AZUL,size=5))
-    fig.update_layout(title=titulo,margin=dict(l=35,r=15,t=50,b=35),showlegend=(i==0),legend=dict(orientation="h",y=1.02),hovermode="x unified",yaxis_title="MWh",bargap=.40)
-    aplicar_estilo_atlantica(fig, altura=330, mostrar_leyenda=(i==0))
+    fig.add_bar(x=con["Nombre_Mes"],y=con["Generacion_MWh"],name="Generación",marker_color=color_barra,width=0.52)
+    fig.add_scatter(x=con["Nombre_Mes"],y=con["Budget_Generacion_MWh"],name="Budget",mode="lines+markers",line=dict(color="#F05A28",width=2),marker=dict(size=5))
+    fig.update_layout(title=titulo,height=330,margin=dict(l=35,r=15,t=50,b=35),showlegend=(i==0),legend=dict(orientation="h",y=1.02),hovermode="x unified",yaxis_title="MWh",bargap=0.40)
+    fig.update_yaxes(rangemode="tozero",gridcolor="rgba(140,140,140,0.18)")
     clave=quitar_tildes(elemento).lower().replace(" ","_")
     with columnas[i%2]:
         st.plotly_chart(fig,use_container_width=True,key=f"grafico_{clave}")
@@ -632,10 +534,9 @@ total["Generacion_Total_MWh"]=total["Generacion_Total_MWh"].fillna(0)
 total["Nombre_Mes"]=total["Mes"].map(MESES_CORTOS)
 st.subheader("Generación mensual total de proyectos")
 fig_t=go.Figure()
-fig_t.add_bar(x=total["Nombre_Mes"],y=total["Generacion_Total_MWh"],name="Generación real total",marker_color=COLOR_VERDE,marker_line_color=COLOR_AZUL,marker_line_width=.4,width=.38,offsetgroup="real")
-fig_t.add_bar(x=total["Nombre_Mes"],y=total["Budget_Total_MWh"],name="Budget total",marker_color=COLOR_AZUL,marker_line_color=COLOR_VERDE,marker_line_width=.4,width=.38,offsetgroup="budget")
-fig_t.update_layout(barmode="group",xaxis_title="Mes",yaxis_title="Generación [MWh]",hovermode="x unified",legend=dict(orientation="h",y=1.02))
-aplicar_estilo_atlantica(fig_t, altura=520)
+fig_t.add_bar(x=total["Nombre_Mes"],y=total["Generacion_Total_MWh"],name="Generación real total",marker_color="#1565C0",width=0.38,offsetgroup="real")
+fig_t.add_bar(x=total["Nombre_Mes"],y=total["Budget_Total_MWh"],name="Budget total",marker_color="#E58A21",width=0.38,offsetgroup="budget")
+fig_t.update_layout(barmode="group",xaxis_title="Mes",yaxis_title="Generación [MWh]",height=520,hovermode="x unified",legend=dict(orientation="h",y=1.02))
 st.plotly_chart(fig_t,use_container_width=True)
 
 meses_con_gen=total[total["Generacion_Total_MWh"]>0]
