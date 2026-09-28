@@ -454,6 +454,15 @@ else:
     fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_Spot_MWh"], name="Spot real", marker_color="#65BDEB", width=ancho)
     fig_d.update_layout(title=f"Inyección diaria BESS, {MESES_COMPLETOS[md]} {ad}", barmode="stack", xaxis_title="Día", yaxis_title="Energía [MWh]", hovermode="x unified", height=500, legend=dict(orientation="h", y=1.02))
     fig_d.update_xaxes(dtick=24*60*60*1000, tickformat="%d", range=[primer-pd.Timedelta(hours=12),ultimo+pd.Timedelta(hours=12)], showgrid=False)
+    fig_d.update_yaxes(
+    range=[0, 120],
+    dtick=20,
+    tick0=0,
+    title_text="Energía [MWh]",
+    gridcolor=COLOR_REJILLA,
+    zeroline=True,
+    zerolinecolor=COLOR_AZUL
+    )
     st.plotly_chart(fig_d, use_container_width=True, key="grafico_diario_bess")
 
 bess_anio = df_bess_final[df_bess_final["Anio"]==anio_seleccionado].copy()
