@@ -1,6 +1,7 @@
 import calendar
 import os
 import time
+import unicodedata
 from datetime import datetime
 
 import pandas as pd
@@ -11,7 +12,7 @@ from streamlit_autorefresh import st_autorefresh
 
 
 # =========================================================
-# CONFIGURACION DE STREAMLIT
+# CONFIGURACION GENERAL DE STREAMLIT
 # =========================================================
 
 st.set_page_config(
@@ -20,13 +21,12 @@ st.set_page_config(
     layout="wide"
 )
 
-# Actualiza la pantalla cada 12 horas.
-DOCE_HORAS_MS = 12 * 60 * 60 * 1000
 DOCE_HORAS_SEGUNDOS = 12 * 60 * 60
+DOCE_HORAS_MILISEGUNDOS = 12 * 60 * 60 * 1000
 
 st_autorefresh(
-    interval=DOCE_HORAS_MS,
-    key="actualizacion_bess_12h"
+    interval=DOCE_HORAS_MILISEGUNDOS,
+    key="actualizacion_dashboard_12_horas"
 )
 
 st.title("Dashboard de operación BESS")
@@ -73,8 +73,13 @@ fecha_actual = pd.Timestamp.now()
 
 if fecha_actual.year == ANIO_OPERACIONAL:
     FECHA_FIN = fecha_actual.strftime("%Y-%m")
-else:
+
+elif fecha_actual.year > ANIO_OPERACIONAL:
     FECHA_FIN = f"{ANIO_OPERACIONAL}-12"
+
+else:
+    FECHA_FIN = f"{ANIO_OPERACIONAL}-01"
+
 
 BARRA_CMG = "M.ELENA_______220"
 
@@ -134,15 +139,118 @@ MESES_COMPLETOS = {
 # FUNCIONES GENERALES
 # =========================================================
 
+def quitar_tildes(texto):
+    texto = str(texto)
+
+    return "".join(
+        caracter
+        for caracter in unicodedata.normalize("NFD", texto)
+        if unicodedata.category(caracter) != "Mn"
+    )
+
+
+def normalizar_nombre_columna(nombre):
+    nombre = quitar_tildes(nombre)
+    nombre = nombre.strip()
+    nombre = nombre.replace(" ", "_")
+    nombre = nombre.replace("-", "_")
+
+    while "__" in nombre:
+        nombre = nombre.replace("__", "_")
+
+    return nombre.lower()
+
+
+def normalizar_columnas_excel(df):
+    """
+    Permite encabezados como Año, AÑO, Anio, ANIO,
+    espacios adicionales y diferencias entre mayúsculas
+    y minúsculas.
+    """
+
+    df = df.copy()
+
+    equivalencias = {
+        "ano": "Anio",
+        "anio": "Anio",
+        "mes": "Mes",
+        "budget_generacion_mwh": "Budget_Generacion_MWh",
+        "budget_ppa_mwh": "Budget_PPA_MWh",
+        "energia_ppa_mwh": "Energia_PPA_MWh",
+        "energia_spot_mwh": "Energia_Spot_MWh",
+        "ingreso_ppa_usd": "Ingreso_PPA_USD",
+        "ingreso_spot_usd": "Ingreso_Spot_USD",
+        "fuente": "Fuente"
+    }
+
+    nuevos_nombres = {}
+
+    for columna in df.columns:
+        nombre_normalizado = normalizar_nombre_columna(
+            columna
+        )
+
+        if nombre_normalizado in equivalencias:
+            nuevos_nombres[columna] = equivalencias[
+                nombre_normalizado
+            ]
+        else:
+            nuevos_nombres[columna] = str(
+                columna
+            ).strip()
+
+    return df.rename(columns=nuevos_nombres)
+
+
+def convertir_numerico(serie):
+    """
+    Convierte números de Excel o API a formato numérico.
+    Acepta números reales o texto con coma decimal.
+    """
+
+    if pd.api.types.is_numeric_dtype(serie):
+        return pd.to_numeric(
+            serie,
+            errors="coerce"
+        )
+
+    serie_limpia = (
+        serie.astype(str)
+        .str.strip()
+        .str.replace(" ", "", regex=False)
+    )
+
+    return pd.to_numeric(
+        serie_limpia.str.replace(",", ".", regex=False),
+        errors="coerce"
+    )
+
+
+def parse_fecha_safe(serie):
+    return pd.to_datetime(
+        serie.astype(str).str[:19],
+        errors="coerce"
+    )
+
+
 def generar_periodos(fecha_inicio, fecha_fin):
-    inicio = datetime.strptime(fecha_inicio, "%Y-%m")
-    fin = datetime.strptime(fecha_fin, "%Y-%m")
+    inicio = datetime.strptime(
+        fecha_inicio,
+        "%Y-%m"
+    )
+
+    fin = datetime.strptime(
+        fecha_fin,
+        "%Y-%m"
+    )
 
     periodos = []
     actual = inicio
 
     while actual <= fin:
-        periodos.append(actual.strftime("%Y%m"))
+        periodos.append(
+            actual.strftime("%Y%m")
+        )
 
         if actual.month == 12:
             actual = actual.replace(
@@ -157,31 +265,18 @@ def generar_periodos(fecha_inicio, fecha_fin):
     return periodos
 
 
-def parse_fecha_safe(serie):
-    return pd.to_datetime(
-        serie.astype(str).str[:19],
-        errors="coerce"
-    )
-
-
-def convertir_numero(serie):
-    return pd.to_numeric(
-        serie.astype(str)
-        .str.replace(" ", "", regex=False)
-        .str.replace(",", ".", regex=False),
-        errors="coerce"
-    ).fillna(0)
-
-
 def periodo_a_texto(periodo):
     anio = int(periodo[:4])
     mes = int(periodo[4:6])
 
-    return f"{MESES_COMPLETOS[mes]} {anio}"
+    return (
+        f"{MESES_COMPLETOS[mes]} "
+        f"{anio}"
+    )
 
 
 # =========================================================
-# LECTURA DE BUDGETS
+# LECTURA Y VALIDACION DE BUDGETS
 # =========================================================
 
 @st.cache_data(
@@ -191,13 +286,18 @@ def periodo_a_texto(periodo):
 def cargar_budgets():
     if not os.path.exists(ARCHIVO_EXCEL):
         raise FileNotFoundError(
-            f"No se encontró {ARCHIVO_EXCEL}."
+            f"No se encontró {ARCHIVO_EXCEL} "
+            "en la carpeta principal."
         )
 
     df_budget = pd.read_excel(
         ARCHIVO_EXCEL,
         sheet_name=HOJA_BUDGETS,
         engine="openpyxl"
+    )
+
+    df_budget = normalizar_columnas_excel(
+        df_budget
     )
 
     columnas_requeridas = [
@@ -207,16 +307,21 @@ def cargar_budgets():
         "Budget_PPA_MWh"
     ]
 
-    faltantes = [
+    columnas_faltantes = [
         columna
         for columna in columnas_requeridas
         if columna not in df_budget.columns
     ]
 
-    if faltantes:
+    if columnas_faltantes:
         raise ValueError(
             "Faltan columnas en la hoja Budgets: "
-            + ", ".join(faltantes)
+            + ", ".join(columnas_faltantes)
+            + ". Columnas encontradas: "
+            + ", ".join(
+                str(columna)
+                for columna in df_budget.columns
+            )
         )
 
     df_budget = df_budget[
@@ -224,9 +329,8 @@ def cargar_budgets():
     ].copy()
 
     for columna in columnas_requeridas:
-        df_budget[columna] = pd.to_numeric(
-            df_budget[columna],
-            errors="coerce"
+        df_budget[columna] = convertir_numerico(
+            df_budget[columna]
         )
 
     df_budget = df_budget.dropna(
@@ -241,9 +345,27 @@ def cargar_budgets():
         df_budget["Mes"].astype(int)
     )
 
-    df_budget = df_budget[
-        df_budget["Mes"].between(1, 12)
-    ].copy()
+    if not df_budget["Mes"].between(
+        1,
+        12
+    ).all():
+        raise ValueError(
+            "La hoja Budgets contiene meses fuera "
+            "del rango 1 a 12."
+        )
+
+    columnas_valores = [
+        "Budget_Generacion_MWh",
+        "Budget_PPA_MWh"
+    ]
+
+    if df_budget[
+        columnas_valores
+    ].isna().any().any():
+        raise ValueError(
+            "La hoja Budgets contiene valores vacíos "
+            "o no numéricos."
+        )
 
     duplicados = df_budget.duplicated(
         subset=["Anio", "Mes"],
@@ -263,7 +385,7 @@ def cargar_budgets():
         )
 
         raise ValueError(
-            "Hay meses duplicados en la hoja Budgets: "
+            "Hay meses duplicados en Budgets: "
             + ", ".join(meses_duplicados)
         )
 
@@ -271,7 +393,7 @@ def cargar_budgets():
 
 
 # =========================================================
-# LECTURA DEL CONSOLIDADO MANUAL
+# LECTURA Y VALIDACION DEL CONSOLIDADO
 # =========================================================
 
 @st.cache_data(
@@ -290,6 +412,10 @@ def cargar_consolidado_excel():
         engine="openpyxl"
     )
 
+    df_consolidado = normalizar_columnas_excel(
+        df_consolidado
+    )
+
     columnas_requeridas = [
         "Anio",
         "Mes",
@@ -299,19 +425,35 @@ def cargar_consolidado_excel():
         "Ingreso_Spot_USD"
     ]
 
-    faltantes = [
+    columnas_faltantes = [
         columna
         for columna in columnas_requeridas
         if columna not in df_consolidado.columns
     ]
 
-    if faltantes:
+    if columnas_faltantes:
         raise ValueError(
             "Faltan columnas en la hoja Consolidado: "
-            + ", ".join(faltantes)
+            + ", ".join(columnas_faltantes)
+            + ". Columnas encontradas: "
+            + ", ".join(
+                str(columna)
+                for columna in df_consolidado.columns
+            )
         )
 
-    df_consolidado = df_consolidado.copy()
+    columnas_a_conservar = (
+        columnas_requeridas
+        + (
+            ["Fuente"]
+            if "Fuente" in df_consolidado.columns
+            else []
+        )
+    )
+
+    df_consolidado = df_consolidado[
+        columnas_a_conservar
+    ].copy()
 
     columnas_numericas = [
         "Anio",
@@ -323,9 +465,8 @@ def cargar_consolidado_excel():
     ]
 
     for columna in columnas_numericas:
-        df_consolidado[columna] = pd.to_numeric(
-            df_consolidado[columna],
-            errors="coerce"
+        df_consolidado[columna] = convertir_numerico(
+            df_consolidado[columna]
         )
 
     df_consolidado = df_consolidado.dropna(
@@ -340,9 +481,36 @@ def cargar_consolidado_excel():
         df_consolidado["Mes"].astype(int)
     )
 
-    df_consolidado = df_consolidado[
-        df_consolidado["Mes"].between(1, 12)
-    ].copy()
+    if not df_consolidado["Mes"].between(
+        1,
+        12
+    ).all():
+        raise ValueError(
+            "La hoja Consolidado contiene meses "
+            "fuera del rango 1 a 12."
+        )
+
+    columnas_valores = [
+        "Energia_PPA_MWh",
+        "Energia_Spot_MWh",
+        "Ingreso_PPA_USD",
+        "Ingreso_Spot_USD"
+    ]
+
+    if df_consolidado[
+        columnas_valores
+    ].isna().any().any():
+        raise ValueError(
+            "La hoja Consolidado contiene valores "
+            "vacíos o no numéricos."
+        )
+
+    if (
+        df_consolidado[columnas_valores] < 0
+    ).any().any():
+        raise ValueError(
+            "La hoja Consolidado contiene valores negativos."
+        )
 
     duplicados = df_consolidado.duplicated(
         subset=["Anio", "Mes"],
@@ -362,29 +530,8 @@ def cargar_consolidado_excel():
         )
 
         raise ValueError(
-            "Hay meses duplicados en la hoja Consolidado: "
+            "Hay meses duplicados en Consolidado: "
             + ", ".join(meses_duplicados)
-        )
-
-    columnas_valores = [
-        "Energia_PPA_MWh",
-        "Energia_Spot_MWh",
-        "Ingreso_PPA_USD",
-        "Ingreso_Spot_USD"
-    ]
-
-    if df_consolidado[columnas_valores].isna().any().any():
-        raise ValueError(
-            "Hay valores vacíos o no numéricos en la hoja "
-            "Consolidado."
-        )
-
-    if (
-        df_consolidado[columnas_valores] < 0
-    ).any().any():
-        raise ValueError(
-            "La hoja Consolidado contiene valores negativos. "
-            "Revisa las energías e ingresos."
         )
 
     df_consolidado["Energia_Total_MWh"] = (
@@ -397,29 +544,29 @@ def cargar_consolidado_excel():
         + df_consolidado["Ingreso_Spot_USD"]
     )
 
-    df_consolidado["Precio_Promedio_USD_MWh"] = (
+    df_consolidado[
+        "Precio_Promedio_USD_MWh"
+    ] = (
         df_consolidado["Ingreso_Total_USD"]
-        / df_consolidado["Energia_Total_MWh"]
-        .replace(0, pd.NA)
+        / df_consolidado[
+            "Energia_Total_MWh"
+        ].replace(0, pd.NA)
     ).fillna(0)
 
-    if "Fuente" not in df_consolidado.columns:
-        df_consolidado["Fuente"] = "Excel consolidado"
-    else:
-        df_consolidado["Fuente"] = (
-            df_consolidado["Fuente"]
-            .fillna("Excel consolidado")
-            .astype(str)
-        )
+    # La fuente se crea automáticamente.
+    # No es necesario incluirla en el Excel.
+    df_consolidado["Fuente"] = (
+        "Excel consolidado"
+    )
 
     return df_consolidado
 
 
 # =========================================================
-# PERIODOS PENDIENTES
+# DETERMINAR MESES QUE DEBE CONSULTAR LA API
 # =========================================================
 
-def obtener_periodos_pendientes(
+def determinar_periodos(
     fecha_inicio,
     fecha_fin,
     df_consolidado
@@ -431,10 +578,10 @@ def obtener_periodos_pendientes(
 
     periodos_excel = set()
 
-    for _, fila in df_consolidado.iterrows():
+    for fila in df_consolidado.itertuples():
         periodo = (
-            f"{int(fila['Anio']):04d}"
-            f"{int(fila['Mes']):02d}"
+            f"{int(fila.Anio):04d}"
+            f"{int(fila.Mes):02d}"
         )
 
         periodos_excel.add(periodo)
@@ -445,11 +592,21 @@ def obtener_periodos_pendientes(
         if periodo not in periodos_excel
     ]
 
-    return periodos_totales, periodos_pendientes
+    periodos_consolidados = [
+        periodo
+        for periodo in periodos_totales
+        if periodo in periodos_excel
+    ]
+
+    return (
+        periodos_totales,
+        periodos_consolidados,
+        periodos_pendientes
+    )
 
 
 # =========================================================
-# API PRMTE
+# CONSULTA API PRMTE
 # =========================================================
 
 def obtener_datos_prmte(periodo, mpid):
@@ -469,10 +626,10 @@ def obtener_datos_prmte(periodo, mpid):
             )
 
             if respuesta.status_code == 200:
-                datos = respuesta.json()
+                contenido = respuesta.json()
 
-                if isinstance(datos, list):
-                    return datos
+                if isinstance(contenido, list):
+                    return contenido
 
                 return []
 
@@ -502,11 +659,11 @@ def descargar_bess_periodos(periodos):
         )
 
     registros_totales = []
-    errores = []
+    advertencias = []
 
     for periodo in periodos:
-        periodo_valido = True
         registros_periodo = []
+        mpids_correctos = 0
 
         for mpid in BESS_MPIDS:
             datos = obtener_datos_prmte(
@@ -515,36 +672,50 @@ def descargar_bess_periodos(periodos):
             )
 
             if datos is None:
-                periodo_valido = False
-
-                errores.append(
+                advertencias.append(
                     f"{periodo_a_texto(periodo)}: "
-                    f"PRMTE no disponible para {mpid}."
+                    f"PRMTE no respondió para {mpid}."
                 )
 
                 continue
 
+            registros_mpid = []
+
             for bloque in datos:
-                for medida in bloque.get(
+                mediciones = bloque.get(
                     "measurement",
                     []
-                ):
-                    registros_periodo.append({
+                )
+
+                for medida in mediciones:
+                    registros_mpid.append({
                         "Fecha": medida.get("dateRange"),
                         "Energia_kWh": medida.get("channel3"),
                         "MPID": mpid,
                         "Periodo": periodo
                     })
 
-        if periodo_valido and registros_periodo:
+            if registros_mpid:
+                mpids_correctos += 1
+                registros_periodo.extend(
+                    registros_mpid
+                )
+            else:
+                advertencias.append(
+                    f"{periodo_a_texto(periodo)}: "
+                    f"sin mediciones para {mpid}."
+                )
+
+        # Se utiliza el mes solamente si respondieron
+        # correctamente los cuatro medidores.
+        if mpids_correctos == len(BESS_MPIDS):
             registros_totales.extend(
                 registros_periodo
             )
-
-        elif not registros_periodo:
-            errores.append(
-                f"{periodo_a_texto(periodo)}: "
-                "el período no entregó mediciones."
+        else:
+            advertencias.append(
+                f"{periodo_a_texto(periodo)} no se incorporó "
+                "porque no están disponibles los cuatro MPID."
             )
 
     if not registros_totales:
@@ -552,7 +723,7 @@ def descargar_bess_periodos(periodos):
             pd.DataFrame(
                 columns=["Fecha", "Energia_kWh"]
             ),
-            sorted(set(errores))
+            sorted(set(advertencias))
         )
 
     df_mediciones = pd.DataFrame(
@@ -563,9 +734,9 @@ def descargar_bess_periodos(periodos):
         df_mediciones["Fecha"]
     )
 
-    df_mediciones["Energia_kWh"] = convertir_numero(
+    df_mediciones["Energia_kWh"] = convertir_numerico(
         df_mediciones["Energia_kWh"]
-    )
+    ).fillna(0)
 
     df_mediciones = df_mediciones.dropna(
         subset=["Fecha"]
@@ -575,34 +746,37 @@ def descargar_bess_periodos(periodos):
         df_mediciones
         .groupby("Fecha", as_index=False)
         .agg(
-            Energia_kWh=("Energia_kWh", "sum")
+            Energia_kWh=(
+                "Energia_kWh",
+                "sum"
+            )
         )
         .sort_values("Fecha")
     )
 
-    return df_bess, sorted(set(errores))
+    return df_bess, sorted(set(advertencias))
 
 
 # =========================================================
-# API CMG
+# CONSULTA API CMG
 # =========================================================
 
 def descargar_cmg_mes(periodo):
     anio = int(periodo[:4])
     mes = int(periodo[4:6])
 
-    primer_dia = pd.Timestamp(
-        year=anio,
-        month=mes,
-        day=1
-    )
-
     ultimo_dia_numero = calendar.monthrange(
         anio,
         mes
     )[1]
 
-    ultimo_dia = pd.Timestamp(
+    fecha_inicio_mes = pd.Timestamp(
+        year=anio,
+        month=mes,
+        day=1
+    )
+
+    fecha_fin_mes = pd.Timestamp(
         year=anio,
         month=mes,
         day=ultimo_dia_numero
@@ -614,8 +788,8 @@ def descargar_cmg_mes(periodo):
         anio == hoy.year
         and mes == hoy.month
     ):
-        ultimo_dia = min(
-            ultimo_dia,
+        fecha_fin_mes = min(
+            fecha_fin_mes,
             hoy
         )
 
@@ -624,8 +798,12 @@ def descargar_cmg_mes(periodo):
 
     while True:
         params = {
-            "startDate": primer_dia.strftime("%Y-%m-%d"),
-            "endDate": ultimo_dia.strftime("%Y-%m-%d"),
+            "startDate": fecha_inicio_mes.strftime(
+                "%Y-%m-%d"
+            ),
+            "endDate": fecha_fin_mes.strftime(
+                "%Y-%m-%d"
+            ),
             "page": pagina,
             "limit": 5000,
             "type": TIPO_CMG,
@@ -643,7 +821,7 @@ def descargar_cmg_mes(periodo):
             if respuesta.status_code != 200:
                 return None
 
-            respuesta_json = respuesta.json()
+            contenido = respuesta.json()
 
         except (
             requests.RequestException,
@@ -651,27 +829,24 @@ def descargar_cmg_mes(periodo):
         ):
             return None
 
-        datos = respuesta_json.get(
+        datos_pagina = contenido.get(
             "data",
             []
         )
 
-        if not datos:
+        if not datos_pagina:
             break
 
-        registros.extend(datos)
+        registros.extend(datos_pagina)
 
-        if len(datos) < 5000:
+        if len(datos_pagina) < 5000:
             break
 
         pagina += 1
 
     if not registros:
         return pd.DataFrame(
-            columns=[
-                "Fecha",
-                "CMG_USD_MWh"
-            ]
+            columns=["Fecha", "CMG_USD_MWh"]
         )
 
     df_cmg = pd.DataFrame(registros)
@@ -699,9 +874,9 @@ def descargar_cmg_mes(periodo):
         errors="coerce"
     ).fillna(0)
 
-    df_cmg["CMG_USD_MWh"] = convertir_numero(
+    df_cmg["CMG_USD_MWh"] = convertir_numerico(
         df_cmg["cmg_usd_mwh_"]
-    )
+    ).fillna(0)
 
     df_cmg["Fecha"] = (
         pd.to_datetime(
@@ -720,10 +895,7 @@ def descargar_cmg_mes(periodo):
 
     df_cmg = (
         df_cmg[
-            [
-                "Fecha",
-                "CMG_USD_MWh"
-            ]
+            ["Fecha", "CMG_USD_MWh"]
         ]
         .dropna(subset=["Fecha"])
         .groupby("Fecha", as_index=False)
@@ -733,6 +905,7 @@ def descargar_cmg_mes(periodo):
                 "mean"
             )
         )
+        .sort_values("Fecha")
     )
 
     return df_cmg
@@ -744,31 +917,37 @@ def descargar_cmg_mes(periodo):
 )
 def descargar_cmg_periodos(periodos):
     dataframes = []
-    errores = []
+    advertencias = []
 
     for periodo in periodos:
-        df_mes = descargar_cmg_mes(periodo)
+        resultado = descargar_cmg_mes(
+            periodo
+        )
 
-        if df_mes is None:
-            errores.append(
+        if resultado is None:
+            advertencias.append(
                 f"{periodo_a_texto(periodo)}: "
                 "CMG no disponible."
             )
 
             continue
 
-        if not df_mes.empty:
-            dataframes.append(df_mes)
+        if resultado.empty:
+            advertencias.append(
+                f"{periodo_a_texto(periodo)}: "
+                "CMG sin registros."
+            )
+
+            continue
+
+        dataframes.append(resultado)
 
     if not dataframes:
         return (
             pd.DataFrame(
-                columns=[
-                    "Fecha",
-                    "CMG_USD_MWh"
-                ]
+                columns=["Fecha", "CMG_USD_MWh"]
             ),
-            sorted(set(errores))
+            sorted(set(advertencias))
         )
 
     df_cmg = (
@@ -786,16 +965,18 @@ def descargar_cmg_periodos(periodos):
         .sort_values("Fecha")
     )
 
-    return df_cmg, sorted(set(errores))
+    return df_cmg, sorted(set(advertencias))
 
 
 # =========================================================
-# VALIDACION DEL EXCEL
+# CARGA Y VALIDACION DEL EXCEL
 # =========================================================
 
 try:
     df_budgets = cargar_budgets()
-    df_consolidado_excel = cargar_consolidado_excel()
+    df_consolidado_excel = (
+        cargar_consolidado_excel()
+    )
 
 except Exception as error:
     st.error(
@@ -807,31 +988,27 @@ except Exception as error:
     st.stop()
 
 
-periodos_totales, periodos_pendientes = (
-    obtener_periodos_pendientes(
-        FECHA_INICIO,
-        FECHA_FIN,
-        df_consolidado_excel
-    )
+(
+    periodos_totales,
+    periodos_consolidados,
+    periodos_pendientes
+) = determinar_periodos(
+    FECHA_INICIO,
+    FECHA_FIN,
+    df_consolidado_excel
 )
-
-periodos_consolidados = [
-    periodo
-    for periodo in periodos_totales
-    if periodo not in periodos_pendientes
-]
 
 
 # =========================================================
-# INFORMACION DE LAS FUENTES
+# ESTADO DE LAS FUENTES
 # =========================================================
 
 with st.expander(
     "Estado de las fuentes de información",
     expanded=False
 ):
-    st.write(
-        "**Meses cargados desde el Excel:**"
+    st.markdown(
+        "**Meses tomados desde el Excel:**"
     )
 
     if periodos_consolidados:
@@ -844,8 +1021,9 @@ with st.expander(
     else:
         st.write("Ninguno")
 
-    st.write(
-        "**Meses que se consultarán desde las API:**"
+    st.markdown(
+        "**Meses que se consultarán automáticamente "
+        "desde las API:**"
     )
 
     if periodos_pendientes:
@@ -860,44 +1038,49 @@ with st.expander(
 
 
 # =========================================================
-# DESCARGA DE PERIODOS NO CONSOLIDADOS
+# DESCARGA DE PERIODOS PENDIENTES
 # =========================================================
 
 with st.spinner(
     "Consultando períodos pendientes en las API..."
 ):
-    df_bess, errores_prmte = (
+    df_bess, advertencias_prmte = (
         descargar_bess_periodos(
             periodos_pendientes
         )
     )
 
-    df_cmg, errores_cmg = (
+    df_cmg, advertencias_cmg = (
         descargar_cmg_periodos(
             periodos_pendientes
         )
     )
 
 
-errores_api = sorted(
-    set(errores_prmte + errores_cmg)
+advertencias_api = sorted(
+    set(
+        advertencias_prmte
+        + advertencias_cmg
+    )
 )
 
-if errores_api:
+if advertencias_api:
     st.warning(
-        "Algunos períodos no estuvieron disponibles en las API. "
-        "El dashboard continuará con la información disponible."
+        "Algunas consultas no estuvieron disponibles. "
+        "El dashboard continuará con la información válida."
     )
 
     with st.expander(
         "Ver advertencias de las API"
     ):
-        for error in errores_api:
-            st.write(f"- {error}")
+        for advertencia in advertencias_api:
+            st.write(
+                f"- {advertencia}"
+            )
 
 
 # =========================================================
-# PROCESAMIENTO DE LA INFORMACION API
+# PROCESAMIENTO DE LA API
 # =========================================================
 
 df_api = pd.DataFrame()
@@ -968,9 +1151,9 @@ if not df_bess.empty:
         df_api["Fecha"].dt.month
     )
 
-    # -----------------------------------------------
-    # RESUMEN DIARIO API
-    # -----------------------------------------------
+    # -----------------------------------------------------
+    # RESUMEN DIARIO
+    # -----------------------------------------------------
 
     diario_largo = (
         df_api
@@ -1009,21 +1192,29 @@ if not df_bess.empty:
     if "SPOT" not in resumen_diario_api.columns:
         resumen_diario_api["SPOT"] = 0
 
-    resumen_diario_api = resumen_diario_api.rename(
-        columns={
-            "PPA": "Energia_PPA_MWh",
-            "SPOT": "Energia_Spot_MWh"
-        }
+    resumen_diario_api = (
+        resumen_diario_api.rename(
+            columns={
+                "PPA": "Energia_PPA_MWh",
+                "SPOT": "Energia_Spot_MWh"
+            }
+        )
     )
 
-    resumen_diario_api["Energia_Total_MWh"] = (
-        resumen_diario_api["Energia_PPA_MWh"]
-        + resumen_diario_api["Energia_Spot_MWh"]
+    resumen_diario_api[
+        "Energia_Total_MWh"
+    ] = (
+        resumen_diario_api[
+            "Energia_PPA_MWh"
+        ]
+        + resumen_diario_api[
+            "Energia_Spot_MWh"
+        ]
     )
 
-    # -----------------------------------------------
-    # RESUMEN MENSUAL API
-    # -----------------------------------------------
+    # -----------------------------------------------------
+    # RESUMEN MENSUAL
+    # -----------------------------------------------------
 
     mensual_largo = (
         df_api
@@ -1108,29 +1299,44 @@ if not df_bess.empty:
         how="outer"
     ).fillna(0)
 
-    resumen_mensual_api["Energia_Total_MWh"] = (
-        resumen_mensual_api["Energia_PPA_MWh"]
-        + resumen_mensual_api["Energia_Spot_MWh"]
+    resumen_mensual_api[
+        "Energia_Total_MWh"
+    ] = (
+        resumen_mensual_api[
+            "Energia_PPA_MWh"
+        ]
+        + resumen_mensual_api[
+            "Energia_Spot_MWh"
+        ]
     )
 
-    resumen_mensual_api["Ingreso_Total_USD"] = (
-        resumen_mensual_api["Ingreso_PPA_USD"]
-        + resumen_mensual_api["Ingreso_Spot_USD"]
+    resumen_mensual_api[
+        "Ingreso_Total_USD"
+    ] = (
+        resumen_mensual_api[
+            "Ingreso_PPA_USD"
+        ]
+        + resumen_mensual_api[
+            "Ingreso_Spot_USD"
+        ]
     )
 
     resumen_mensual_api[
         "Precio_Promedio_USD_MWh"
     ] = (
-        resumen_mensual_api["Ingreso_Total_USD"]
-        / resumen_mensual_api["Energia_Total_MWh"]
-        .replace(0, pd.NA)
+        resumen_mensual_api[
+            "Ingreso_Total_USD"
+        ]
+        / resumen_mensual_api[
+            "Energia_Total_MWh"
+        ].replace(0, pd.NA)
     ).fillna(0)
 
     resumen_mensual_api["Fuente"] = "API"
 
 
 # =========================================================
-# CONSOLIDADO FINAL: EXCEL + API
+# UNION DEL EXCEL Y LA API
 # =========================================================
 
 columnas_finales = [
@@ -1146,27 +1352,33 @@ columnas_finales = [
     "Fuente"
 ]
 
-fuentes_mensuales = [
-    df_consolidado_excel[columnas_finales]
+fuentes = [
+    df_consolidado_excel[
+        columnas_finales
+    ]
 ]
 
 if not resumen_mensual_api.empty:
-    fuentes_mensuales.append(
-        resumen_mensual_api[columnas_finales]
+    fuentes.append(
+        resumen_mensual_api[
+            columnas_finales
+        ]
     )
 
 resumen_mensual_final = pd.concat(
-    fuentes_mensuales,
+    fuentes,
     ignore_index=True
 )
 
-# Excel siempre tiene mayor prioridad que la API.
+# El Excel siempre tiene prioridad si por alguna razón
+# el mismo mes aparece también en la API.
+
 resumen_mensual_final["Prioridad"] = (
     resumen_mensual_final["Fuente"]
     .apply(
-        lambda fuente: (
+        lambda valor: (
             2
-            if str(fuente).lower() != "api"
+            if valor == "Excel consolidado"
             else 1
         )
     )
@@ -1186,7 +1398,7 @@ resumen_mensual_final = (
 
 
 # =========================================================
-# FILTROS
+# FILTRO ANUAL
 # =========================================================
 
 st.sidebar.header("Filtros")
@@ -1204,15 +1416,15 @@ anio_seleccionado = st.sidebar.selectbox(
     index=0
 )
 
-
-# =========================================================
-# INDICADORES ANUALES
-# =========================================================
-
 resumen_anio = resumen_mensual_final[
     resumen_mensual_final["Anio"]
     == anio_seleccionado
 ].copy()
+
+
+# =========================================================
+# INDICADORES ANUALES
+# =========================================================
 
 energia_total_anual = (
     resumen_anio["Energia_Total_MWh"]
@@ -1261,18 +1473,20 @@ col4.metric(
 # GRAFICO DIARIO
 # =========================================================
 
-st.subheader("Distribución diaria de energía")
+st.subheader(
+    "Distribución diaria de energía"
+)
 
 if resumen_diario_api.empty:
     st.info(
         "No hay información diaria disponible desde las API. "
-        "Los meses consolidados manualmente solo contienen "
-        "totales mensuales."
+        "Los meses del Excel contienen totales mensuales."
     )
 
 else:
     meses_diarios = (
-        resumen_diario_api.assign(
+        resumen_diario_api
+        .assign(
             Anio=resumen_diario_api[
                 "Fecha_Dia"
             ].dt.year,
@@ -1288,14 +1502,17 @@ else:
         )
     )
 
-    opciones_meses = [
-        (int(fila.Anio), int(fila.Mes))
+    opciones_diarias = [
+        (
+            int(fila.Anio),
+            int(fila.Mes)
+        )
         for fila in meses_diarios.itertuples()
     ]
 
     seleccion_diaria = st.sidebar.selectbox(
         "Mes para gráfico diario",
-        options=opciones_meses,
+        options=opciones_diarias,
         format_func=lambda valor: (
             f"{MESES_COMPLETOS[valor[1]]} "
             f"{valor[0]}"
@@ -1318,21 +1535,21 @@ else:
         )
     ].copy()
 
-    primer_dia_mes = pd.Timestamp(
+    primer_dia = pd.Timestamp(
         year=anio_diario,
         month=mes_diario,
         day=1
     )
 
-    cantidad_dias = calendar.monthrange(
+    ultimo_dia_numero = calendar.monthrange(
         anio_diario,
         mes_diario
     )[1]
 
-    ultimo_dia_mes = pd.Timestamp(
+    ultimo_dia = pd.Timestamp(
         year=anio_diario,
         month=mes_diario,
-        day=cantidad_dias
+        day=ultimo_dia_numero
     )
 
     hoy = pd.Timestamp.now().normalize()
@@ -1341,17 +1558,15 @@ else:
         anio_diario == hoy.year
         and mes_diario == hoy.month
     ):
-        ultimo_dia_grafico = min(
-            ultimo_dia_mes,
+        ultimo_dia = min(
+            ultimo_dia,
             hoy
         )
-    else:
-        ultimo_dia_grafico = ultimo_dia_mes
 
     calendario_mes = pd.DataFrame({
         "Fecha_Dia": pd.date_range(
-            start=primer_dia_mes,
-            end=ultimo_dia_grafico,
+            start=primer_dia,
+            end=ultimo_dia,
             freq="D"
         )
     })
@@ -1382,7 +1597,9 @@ else:
     fig_diario.add_trace(
         go.Bar(
             x=diario_mes["Fecha_Dia"],
-            y=diario_mes["Energia_PPA_MWh"],
+            y=diario_mes[
+                "Energia_PPA_MWh"
+            ],
             name="Energía PPA",
             marker_color="#7DBCF0",
             marker_line_color="#1683DB",
@@ -1399,7 +1616,9 @@ else:
     fig_diario.add_trace(
         go.Bar(
             x=diario_mes["Fecha_Dia"],
-            y=diario_mes["Energia_Spot_MWh"],
+            y=diario_mes[
+                "Energia_Spot_MWh"
+            ],
             name="Energía Spot",
             marker_color="#0A69C7",
             marker_line_color="#1683DB",
@@ -1438,9 +1657,9 @@ else:
         dtick=24 * 60 * 60 * 1000,
         tickformat="%d",
         range=[
-            primer_dia_mes
+            primer_dia
             - pd.Timedelta(hours=12),
-            ultimo_dia_grafico
+            ultimo_dia
             + pd.Timedelta(hours=12)
         ],
         showgrid=False
@@ -1448,7 +1667,9 @@ else:
 
     fig_diario.update_yaxes(
         rangemode="tozero",
-        gridcolor="rgba(140, 140, 140, 0.25)"
+        gridcolor=(
+            "rgba(140, 140, 140, 0.25)"
+        )
     )
 
     st.plotly_chart(
@@ -1458,7 +1679,7 @@ else:
 
 
 # =========================================================
-# CONSOLIDADO ANUAL
+# GRAFICO CONSOLIDADO ANUAL
 # =========================================================
 
 st.subheader(
@@ -1492,7 +1713,7 @@ consolidado_anual = consolidado_anual.merge(
     how="left"
 )
 
-columnas_cero = [
+columnas_resultados = [
     "Energia_PPA_MWh",
     "Energia_Spot_MWh",
     "Energia_Total_MWh",
@@ -1501,12 +1722,12 @@ columnas_cero = [
     "Ingreso_Total_USD"
 ]
 
-for columna in columnas_cero:
+for columna in columnas_resultados:
     if columna not in consolidado_anual.columns:
         consolidado_anual[columna] = 0
 
-consolidado_anual[columnas_cero] = (
-    consolidado_anual[columnas_cero]
+consolidado_anual[columnas_resultados] = (
+    consolidado_anual[columnas_resultados]
     .fillna(0)
 )
 
@@ -1520,7 +1741,9 @@ fig_anual = go.Figure()
 fig_anual.add_trace(
     go.Bar(
         x=consolidado_anual["Nombre_Mes"],
-        y=consolidado_anual["Energia_PPA_MWh"],
+        y=consolidado_anual[
+            "Energia_PPA_MWh"
+        ],
         name="Energía PPA real",
         marker_color="#149447",
         marker_line_color="#1559A6",
@@ -1537,7 +1760,9 @@ fig_anual.add_trace(
 fig_anual.add_trace(
     go.Bar(
         x=consolidado_anual["Nombre_Mes"],
-        y=consolidado_anual["Energia_Spot_MWh"],
+        y=consolidado_anual[
+            "Energia_Spot_MWh"
+        ],
         name="Energía Spot real",
         marker_color="#D94141",
         marker_line_color="#1559A6",
@@ -1569,7 +1794,8 @@ fig_anual.add_trace(
         ),
         hovertemplate=(
             "<b>%{x}</b><br>"
-            "Budget generación: %{y:,.2f} MWh"
+            "Budget generación: "
+            "%{y:,.2f} MWh"
             "<extra></extra>"
         )
     )
@@ -1578,7 +1804,9 @@ fig_anual.add_trace(
 fig_anual.add_trace(
     go.Scatter(
         x=consolidado_anual["Nombre_Mes"],
-        y=consolidado_anual["Budget_PPA_MWh"],
+        y=consolidado_anual[
+            "Budget_PPA_MWh"
+        ],
         name="Budget contrato PPA",
         mode="lines+markers",
         line=dict(
@@ -1634,7 +1862,9 @@ fig_anual.update_xaxes(
 
 fig_anual.update_yaxes(
     rangemode="tozero",
-    gridcolor="rgba(140, 140, 140, 0.25)"
+    gridcolor=(
+        "rgba(140, 140, 140, 0.25)"
+    )
 )
 
 st.plotly_chart(
@@ -1648,7 +1878,9 @@ st.plotly_chart(
 # =========================================================
 
 meses_con_resultados = (
-    consolidado_anual["Energia_Total_MWh"] > 0
+    consolidado_anual[
+        "Energia_Total_MWh"
+    ] > 0
 )
 
 budget_generacion_acumulado = (
@@ -1699,7 +1931,7 @@ col_budget_2.metric(
 
 
 # =========================================================
-# FUENTE DE CADA MES
+# FUENTE UTILIZADA
 # =========================================================
 
 with st.expander(
@@ -1748,6 +1980,6 @@ st.caption(
 )
 
 st.caption(
-    "Las consultas API y la caché se renuevan "
+    "Las consultas API y la caché se actualizan "
     "cada 12 horas."
 )
