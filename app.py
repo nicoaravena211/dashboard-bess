@@ -12,11 +12,11 @@ from streamlit_autorefresh import st_autorefresh
 
 
 # =========================================================
-# CONFIGURACION GENERAL DE STREAMLIT
+# CONFIGURACION GENERAL
 # =========================================================
 
 st.set_page_config(
-    page_title="Dashboard BESS",
+    page_title="Dashboard de Operación",
     page_icon="⚡",
     layout="wide"
 )
@@ -26,14 +26,13 @@ DOCE_HORAS_MILISEGUNDOS = 12 * 60 * 60 * 1000
 
 st_autorefresh(
     interval=DOCE_HORAS_MILISEGUNDOS,
-    key="actualizacion_dashboard_12_horas"
+    key="actualizacion_dashboard_12h"
 )
 
-st.title("Dashboard de operación BESS")
-
+st.title("Dashboard de operación")
 st.caption(
-    "Seguimiento de energía inyectada, distribución PPA y Spot, "
-    "valorización y cumplimiento de budget"
+    "Seguimiento mensual de generación de proyectos "
+    "y operación del BESS María Elena"
 )
 
 
@@ -47,8 +46,8 @@ try:
 
 except KeyError:
     st.error(
-        "No se encontraron las credenciales API en "
-        "los Secrets de Streamlit."
+        "No se encontraron las credenciales API "
+        "en los Secrets de Streamlit."
     )
 
     st.info(
@@ -63,36 +62,30 @@ except KeyError:
 # CONFIGURACION OPERACIONAL
 # =========================================================
 
-PRECIO_PPA = 83.49
-TIPO_CMG = "PRELIMINAR"
-
 ANIO_OPERACIONAL = 2026
-FECHA_INICIO = "2026-01"
+FECHA_INICIO = f"{ANIO_OPERACIONAL}-01"
 
-fecha_actual = pd.Timestamp.now()
+hoy = pd.Timestamp.now()
 
-if fecha_actual.year == ANIO_OPERACIONAL:
-    FECHA_FIN = fecha_actual.strftime("%Y-%m")
-
-elif fecha_actual.year > ANIO_OPERACIONAL:
+if hoy.year == ANIO_OPERACIONAL:
+    FECHA_FIN = hoy.strftime("%Y-%m")
+elif hoy.year > ANIO_OPERACIONAL:
     FECHA_FIN = f"{ANIO_OPERACIONAL}-12"
-
 else:
     FECHA_FIN = f"{ANIO_OPERACIONAL}-01"
 
 
-BARRA_CMG = "M.ELENA_______220"
+# Precio PPA actualizado
+PRECIO_PPA = 83.29
 
-BESS_MPIDS = [
-    "MARELENA_023_E1_GSS",
-    "MARELENA_023_E7_GSS",
-    "MARELENA_023_E8_GSS",
-    "MARELENA_023_E11_GSS"
-]
+TIPO_CMG = "PRELIMINAR"
+BARRA_CMG_BESS = "M.ELENA_______220"
 
 ARCHIVO_EXCEL = "budgets.xlsx"
-HOJA_BUDGETS = "Budgets"
-HOJA_CONSOLIDADO = "Consolidado"
+
+HOJA_BUDGETS_BESS = "Budgets"
+HOJA_CONSOLIDADO_BESS = "Consolidado"
+HOJA_BUDGETS_PROYECTOS = "Budgets_Proyectos"
 
 URL_PRMTE = (
     "https://medidas.api.coordinador.cl/"
@@ -103,6 +96,86 @@ URL_CMG = (
     "https://sipub.api.coordinador.cl/"
     "costo-marginal-real/v4/findByDate"
 )
+
+
+# =========================================================
+# CONFIGURACION DE PROYECTOS
+# =========================================================
+
+PROYECTOS_GENERACION = {
+    "MARIA ELENA PFV": [
+        {
+            "mpid": "MARELENA_220_JT1_GSS",
+            "canal": 3
+        }
+    ],
+    "SAN PEDRO III": [
+        {
+            "mpid": "SOLRJAMA_220_JT1_RUC",
+            "canal": 3
+        },
+        {
+            "mpid": "SOLRJAMA_220_JT2_RUC",
+            "canal": 3
+        }
+    ],
+    "DOÑA CARMEN": [
+        {
+            "mpid": "CDNCARMN_220_J1_ECM",
+            "canal": 3
+        }
+    ],
+    "LA QUINTA": [
+        {
+            "mpid": "CABRERO_023_PMGD7_QTC",
+            "canal": 3
+        }
+    ],
+    "LA PERLA": [
+        {
+            "mpid": "LSANGLES_013_PMGD7_LAP",
+            "canal": 3
+        }
+    ],
+    "LA HUERTA": [
+        {
+            "mpid": "PARRONAL_013_PMGD2_HUE",
+            "canal": 3
+        }
+    ],
+    "CHACAICO": [
+        {
+            "mpid": "LSANGLES_013_PMGD8_CCC",
+            "canal": 3
+        }
+    ],
+    "SANCLEMENTE": [
+        {
+            "mpid": "SCLMENTE_013_PMGD4_CFL",
+            "canal": 3
+        }
+    ],
+    "TRILALEO": [
+        {
+            "mpid": "CHOLGUAN_015_PMGD6_YTL",
+            "canal": 3
+        }
+    ],
+    "COLLANCO": [
+        {
+            "mpid": "CNSTUCON_023_PMGD4_OAO",
+            "canal": 3
+        }
+    ]
+}
+
+BESS_MPIDS = [
+    "MARELENA_023_E1_GSS",
+    "MARELENA_023_E7_GSS",
+    "MARELENA_023_E8_GSS",
+    "MARELENA_023_E11_GSS"
+]
+
 
 NOMBRES_MESES = {
     1: "Ene",
@@ -140,11 +213,12 @@ MESES_COMPLETOS = {
 # =========================================================
 
 def quitar_tildes(texto):
-    texto = str(texto)
-
     return "".join(
         caracter
-        for caracter in unicodedata.normalize("NFD", texto)
+        for caracter in unicodedata.normalize(
+            "NFD",
+            str(texto)
+        )
         if unicodedata.category(caracter) != "Mn"
     )
 
@@ -162,66 +236,60 @@ def normalizar_nombre_columna(nombre):
 
 
 def normalizar_columnas_excel(df):
-    """
-    Permite encabezados como Año, AÑO, Anio, ANIO,
-    espacios adicionales y diferencias entre mayúsculas
-    y minúsculas.
-    """
-
     df = df.copy()
 
     equivalencias = {
         "ano": "Anio",
         "anio": "Anio",
         "mes": "Mes",
-        "budget_generacion_mwh": "Budget_Generacion_MWh",
-        "budget_ppa_mwh": "Budget_PPA_MWh",
-        "energia_ppa_mwh": "Energia_PPA_MWh",
-        "energia_spot_mwh": "Energia_Spot_MWh",
-        "ingreso_ppa_usd": "Ingreso_PPA_USD",
-        "ingreso_spot_usd": "Ingreso_Spot_USD",
-        "fuente": "Fuente"
+        "proyecto": "Proyecto",
+        "budget_generacion_mwh":
+            "Budget_Generacion_MWh",
+        "budget_ppa_mwh":
+            "Budget_PPA_MWh",
+        "energia_ppa_mwh":
+            "Energia_PPA_MWh",
+        "energia_spot_mwh":
+            "Energia_Spot_MWh",
+        "ingreso_ppa_usd":
+            "Ingreso_PPA_USD",
+        "ingreso_spot_usd":
+            "Ingreso_Spot_USD"
     }
 
     nuevos_nombres = {}
 
     for columna in df.columns:
-        nombre_normalizado = normalizar_nombre_columna(
+        normalizado = normalizar_nombre_columna(
             columna
         )
 
-        if nombre_normalizado in equivalencias:
-            nuevos_nombres[columna] = equivalencias[
-                nombre_normalizado
-            ]
-        else:
-            nuevos_nombres[columna] = str(
-                columna
-            ).strip()
+        nuevos_nombres[columna] = (
+            equivalencias.get(
+                normalizado,
+                str(columna).strip()
+            )
+        )
 
     return df.rename(columns=nuevos_nombres)
 
 
 def convertir_numerico(serie):
-    """
-    Convierte números de Excel o API a formato numérico.
-    Acepta números reales o texto con coma decimal.
-    """
-
     if pd.api.types.is_numeric_dtype(serie):
         return pd.to_numeric(
             serie,
             errors="coerce"
         )
 
-    serie_limpia = (
+    texto = (
         serie.astype(str)
         .str.strip()
         .str.replace(" ", "", regex=False)
+        .str.replace(",", ".", regex=False)
     )
 
     return pd.to_numeric(
-        serie_limpia.str.replace(",", ".", regex=False),
+        texto,
         errors="coerce"
     )
 
@@ -275,343 +343,23 @@ def periodo_a_texto(periodo):
     )
 
 
-# =========================================================
-# LECTURA Y VALIDACION DE BUDGETS
-# =========================================================
-
-@st.cache_data(
-    ttl=DOCE_HORAS_SEGUNDOS,
-    show_spinner=False
+PERIODOS_ANIO = generar_periodos(
+    FECHA_INICIO,
+    FECHA_FIN
 )
-def cargar_budgets():
-    if not os.path.exists(ARCHIVO_EXCEL):
-        raise FileNotFoundError(
-            f"No se encontró {ARCHIVO_EXCEL} "
-            "en la carpeta principal."
-        )
-
-    df_budget = pd.read_excel(
-        ARCHIVO_EXCEL,
-        sheet_name=HOJA_BUDGETS,
-        engine="openpyxl"
-    )
-
-    df_budget = normalizar_columnas_excel(
-        df_budget
-    )
-
-    columnas_requeridas = [
-        "Anio",
-        "Mes",
-        "Budget_Generacion_MWh",
-        "Budget_PPA_MWh"
-    ]
-
-    columnas_faltantes = [
-        columna
-        for columna in columnas_requeridas
-        if columna not in df_budget.columns
-    ]
-
-    if columnas_faltantes:
-        raise ValueError(
-            "Faltan columnas en la hoja Budgets: "
-            + ", ".join(columnas_faltantes)
-            + ". Columnas encontradas: "
-            + ", ".join(
-                str(columna)
-                for columna in df_budget.columns
-            )
-        )
-
-    df_budget = df_budget[
-        columnas_requeridas
-    ].copy()
-
-    for columna in columnas_requeridas:
-        df_budget[columna] = convertir_numerico(
-            df_budget[columna]
-        )
-
-    df_budget = df_budget.dropna(
-        subset=["Anio", "Mes"]
-    )
-
-    df_budget["Anio"] = (
-        df_budget["Anio"].astype(int)
-    )
-
-    df_budget["Mes"] = (
-        df_budget["Mes"].astype(int)
-    )
-
-    if not df_budget["Mes"].between(
-        1,
-        12
-    ).all():
-        raise ValueError(
-            "La hoja Budgets contiene meses fuera "
-            "del rango 1 a 12."
-        )
-
-    columnas_valores = [
-        "Budget_Generacion_MWh",
-        "Budget_PPA_MWh"
-    ]
-
-    if df_budget[
-        columnas_valores
-    ].isna().any().any():
-        raise ValueError(
-            "La hoja Budgets contiene valores vacíos "
-            "o no numéricos."
-        )
-
-    duplicados = df_budget.duplicated(
-        subset=["Anio", "Mes"],
-        keep=False
-    )
-
-    if duplicados.any():
-        meses_duplicados = (
-            df_budget.loc[
-                duplicados,
-                ["Anio", "Mes"]
-            ]
-            .drop_duplicates()
-            .astype(str)
-            .agg("-".join, axis=1)
-            .tolist()
-        )
-
-        raise ValueError(
-            "Hay meses duplicados en Budgets: "
-            + ", ".join(meses_duplicados)
-        )
-
-    return df_budget
 
 
 # =========================================================
-# LECTURA Y VALIDACION DEL CONSOLIDADO
+# CONSULTA GENERAL PRMTE
 # =========================================================
 
-@st.cache_data(
-    ttl=DOCE_HORAS_SEGUNDOS,
-    show_spinner=False
-)
-def cargar_consolidado_excel():
-    if not os.path.exists(ARCHIVO_EXCEL):
-        raise FileNotFoundError(
-            f"No se encontró {ARCHIVO_EXCEL}."
-        )
-
-    df_consolidado = pd.read_excel(
-        ARCHIVO_EXCEL,
-        sheet_name=HOJA_CONSOLIDADO,
-        engine="openpyxl"
-    )
-
-    df_consolidado = normalizar_columnas_excel(
-        df_consolidado
-    )
-
-    columnas_requeridas = [
-        "Anio",
-        "Mes",
-        "Energia_PPA_MWh",
-        "Energia_Spot_MWh",
-        "Ingreso_PPA_USD",
-        "Ingreso_Spot_USD"
-    ]
-
-    columnas_faltantes = [
-        columna
-        for columna in columnas_requeridas
-        if columna not in df_consolidado.columns
-    ]
-
-    if columnas_faltantes:
-        raise ValueError(
-            "Faltan columnas en la hoja Consolidado: "
-            + ", ".join(columnas_faltantes)
-            + ". Columnas encontradas: "
-            + ", ".join(
-                str(columna)
-                for columna in df_consolidado.columns
-            )
-        )
-
-    columnas_a_conservar = (
-        columnas_requeridas
-        + (
-            ["Fuente"]
-            if "Fuente" in df_consolidado.columns
-            else []
-        )
-    )
-
-    df_consolidado = df_consolidado[
-        columnas_a_conservar
-    ].copy()
-
-    columnas_numericas = [
-        "Anio",
-        "Mes",
-        "Energia_PPA_MWh",
-        "Energia_Spot_MWh",
-        "Ingreso_PPA_USD",
-        "Ingreso_Spot_USD"
-    ]
-
-    for columna in columnas_numericas:
-        df_consolidado[columna] = convertir_numerico(
-            df_consolidado[columna]
-        )
-
-    df_consolidado = df_consolidado.dropna(
-        subset=["Anio", "Mes"]
-    )
-
-    df_consolidado["Anio"] = (
-        df_consolidado["Anio"].astype(int)
-    )
-
-    df_consolidado["Mes"] = (
-        df_consolidado["Mes"].astype(int)
-    )
-
-    if not df_consolidado["Mes"].between(
-        1,
-        12
-    ).all():
-        raise ValueError(
-            "La hoja Consolidado contiene meses "
-            "fuera del rango 1 a 12."
-        )
-
-    columnas_valores = [
-        "Energia_PPA_MWh",
-        "Energia_Spot_MWh",
-        "Ingreso_PPA_USD",
-        "Ingreso_Spot_USD"
-    ]
-
-    if df_consolidado[
-        columnas_valores
-    ].isna().any().any():
-        raise ValueError(
-            "La hoja Consolidado contiene valores "
-            "vacíos o no numéricos."
-        )
-
-    if (
-        df_consolidado[columnas_valores] < 0
-    ).any().any():
-        raise ValueError(
-            "La hoja Consolidado contiene valores negativos."
-        )
-
-    duplicados = df_consolidado.duplicated(
-        subset=["Anio", "Mes"],
-        keep=False
-    )
-
-    if duplicados.any():
-        meses_duplicados = (
-            df_consolidado.loc[
-                duplicados,
-                ["Anio", "Mes"]
-            ]
-            .drop_duplicates()
-            .astype(str)
-            .agg("-".join, axis=1)
-            .tolist()
-        )
-
-        raise ValueError(
-            "Hay meses duplicados en Consolidado: "
-            + ", ".join(meses_duplicados)
-        )
-
-    df_consolidado["Energia_Total_MWh"] = (
-        df_consolidado["Energia_PPA_MWh"]
-        + df_consolidado["Energia_Spot_MWh"]
-    )
-
-    df_consolidado["Ingreso_Total_USD"] = (
-        df_consolidado["Ingreso_PPA_USD"]
-        + df_consolidado["Ingreso_Spot_USD"]
-    )
-
-    df_consolidado[
-        "Precio_Promedio_USD_MWh"
-    ] = (
-        df_consolidado["Ingreso_Total_USD"]
-        / df_consolidado[
-            "Energia_Total_MWh"
-        ].replace(0, pd.NA)
-    ).fillna(0)
-
-    # La fuente se crea automáticamente.
-    # No es necesario incluirla en el Excel.
-    df_consolidado["Fuente"] = (
-        "Excel consolidado"
-    )
-
-    return df_consolidado
-
-
-# =========================================================
-# DETERMINAR MESES QUE DEBE CONSULTAR LA API
-# =========================================================
-
-def determinar_periodos(
-    fecha_inicio,
-    fecha_fin,
-    df_consolidado
+def obtener_datos_prmte(
+    periodo,
+    mpid,
+    canal
 ):
-    periodos_totales = generar_periodos(
-        fecha_inicio,
-        fecha_fin
-    )
-
-    periodos_excel = set()
-
-    for fila in df_consolidado.itertuples():
-        periodo = (
-            f"{int(fila.Anio):04d}"
-            f"{int(fila.Mes):02d}"
-        )
-
-        periodos_excel.add(periodo)
-
-    periodos_pendientes = [
-        periodo
-        for periodo in periodos_totales
-        if periodo not in periodos_excel
-    ]
-
-    periodos_consolidados = [
-        periodo
-        for periodo in periodos_totales
-        if periodo in periodos_excel
-    ]
-
-    return (
-        periodos_totales,
-        periodos_consolidados,
-        periodos_pendientes
-    )
-
-
-# =========================================================
-# CONSULTA API PRMTE
-# =========================================================
-
-def obtener_datos_prmte(periodo, mpid):
     params = {
-        "channelId": 3,
+        "channelId": canal,
         "measurePointId": mpid,
         "period": periodo,
         "user_key": API_KEY_PRMTE
@@ -626,10 +374,10 @@ def obtener_datos_prmte(periodo, mpid):
             )
 
             if respuesta.status_code == 200:
-                contenido = respuesta.json()
+                datos = respuesta.json()
 
-                if isinstance(contenido, list):
-                    return contenido
+                if isinstance(datos, list):
+                    return datos
 
                 return []
 
@@ -645,169 +393,499 @@ def obtener_datos_prmte(periodo, mpid):
     return None
 
 
+def extraer_mediciones(
+    datos,
+    canal
+):
+    registros = []
+    nombre_canal = f"channel{canal}"
+
+    if datos is None:
+        return registros
+
+    for bloque in datos:
+        mediciones = bloque.get(
+            "measurement",
+            []
+        )
+
+        for medicion in mediciones:
+            registros.append({
+                "Fecha": medicion.get(
+                    "dateRange"
+                ),
+                "Energia_kWh": medicion.get(
+                    nombre_canal
+                )
+            })
+
+    return registros
+
+
+# =========================================================
+# DESCARGA DE GENERACION DE OTROS PROYECTOS
+# =========================================================
+
 @st.cache_data(
     ttl=DOCE_HORAS_SEGUNDOS,
     show_spinner=False
 )
-def descargar_bess_periodos(periodos):
-    if not periodos:
-        return (
-            pd.DataFrame(
-                columns=["Fecha", "Energia_kWh"]
-            ),
-            []
-        )
-
-    registros_totales = []
+def descargar_generacion_proyectos(periodos):
+    resultados = []
     advertencias = []
 
-    for periodo in periodos:
-        registros_periodo = []
-        mpids_correctos = 0
+    for proyecto, configuraciones in (
+        PROYECTOS_GENERACION.items()
+    ):
+        registros_proyecto = []
 
-        for mpid in BESS_MPIDS:
-            datos = obtener_datos_prmte(
-                periodo + "012345",
-                mpid
-            )
+        for periodo in periodos:
+            registros_periodo = []
+            medidores_correctos = 0
 
-            if datos is None:
-                advertencias.append(
-                    f"{periodo_a_texto(periodo)}: "
-                    f"PRMTE no respondió para {mpid}."
+            for configuracion in configuraciones:
+                mpid = configuracion["mpid"]
+                canal = configuracion["canal"]
+
+                datos = obtener_datos_prmte(
+                    periodo + "012345",
+                    mpid,
+                    canal
                 )
 
-                continue
+                if datos is None:
+                    advertencias.append(
+                        f"{proyecto}, "
+                        f"{periodo_a_texto(periodo)}: "
+                        f"la API no respondió para {mpid}."
+                    )
+                    continue
 
-            registros_mpid = []
-
-            for bloque in datos:
-                mediciones = bloque.get(
-                    "measurement",
-                    []
+                registros_mpid = extraer_mediciones(
+                    datos,
+                    canal
                 )
 
-                for medida in mediciones:
-                    registros_mpid.append({
-                        "Fecha": medida.get("dateRange"),
-                        "Energia_kWh": medida.get("channel3"),
-                        "MPID": mpid,
-                        "Periodo": periodo
-                    })
+                if registros_mpid:
+                    medidores_correctos += 1
+                    registros_periodo.extend(
+                        registros_mpid
+                    )
+                else:
+                    advertencias.append(
+                        f"{proyecto}, "
+                        f"{periodo_a_texto(periodo)}: "
+                        f"sin mediciones para {mpid}."
+                    )
 
-            if registros_mpid:
-                mpids_correctos += 1
-                registros_periodo.extend(
-                    registros_mpid
+            if (
+                medidores_correctos
+                == len(configuraciones)
+            ):
+                for registro in registros_periodo:
+                    registro["Proyecto"] = proyecto
+                    registro["Periodo"] = periodo
+
+                registros_proyecto.extend(
+                    registros_periodo
                 )
             else:
                 advertencias.append(
-                    f"{periodo_a_texto(periodo)}: "
-                    f"sin mediciones para {mpid}."
+                    f"{proyecto}, "
+                    f"{periodo_a_texto(periodo)} "
+                    "no se incorporó porque faltan "
+                    "medidores."
                 )
 
-        # Se utiliza el mes solamente si respondieron
-        # correctamente los cuatro medidores.
-        if mpids_correctos == len(BESS_MPIDS):
-            registros_totales.extend(
-                registros_periodo
-            )
-        else:
-            advertencias.append(
-                f"{periodo_a_texto(periodo)} no se incorporó "
-                "porque no están disponibles los cuatro MPID."
+        if registros_proyecto:
+            df_proyecto = pd.DataFrame(
+                registros_proyecto
             )
 
-    if not registros_totales:
+            df_proyecto["Fecha"] = (
+                parse_fecha_safe(
+                    df_proyecto["Fecha"]
+                )
+            )
+
+            df_proyecto["Energia_kWh"] = (
+                convertir_numerico(
+                    df_proyecto["Energia_kWh"]
+                )
+                .fillna(0)
+            )
+
+            df_proyecto = (
+                df_proyecto.dropna(
+                    subset=["Fecha"]
+                )
+            )
+
+            # Suma todos los MPID del proyecto por intervalo.
+            df_proyecto = (
+                df_proyecto
+                .groupby(
+                    [
+                        "Proyecto",
+                        "Fecha"
+                    ],
+                    as_index=False
+                )
+                .agg(
+                    Energia_kWh=(
+                        "Energia_kWh",
+                        "sum"
+                    )
+                )
+            )
+
+            resultados.append(df_proyecto)
+
+    if not resultados:
         return (
             pd.DataFrame(
-                columns=["Fecha", "Energia_kWh"]
+                columns=[
+                    "Proyecto",
+                    "Fecha",
+                    "Energia_kWh"
+                ]
             ),
             sorted(set(advertencias))
         )
 
-    df_mediciones = pd.DataFrame(
-        registros_totales
+    df_generacion = pd.concat(
+        resultados,
+        ignore_index=True
     )
 
-    df_mediciones["Fecha"] = parse_fecha_safe(
-        df_mediciones["Fecha"]
+    # La API entrega kWh.
+    # Para generación se usan valores absolutos.
+    df_generacion["Generacion_MWh"] = (
+        df_generacion["Energia_kWh"]
+        .abs()
+        / 1000
     )
 
-    df_mediciones["Energia_kWh"] = convertir_numerico(
-        df_mediciones["Energia_kWh"]
-    ).fillna(0)
-
-    df_mediciones = df_mediciones.dropna(
-        subset=["Fecha"]
+    df_generacion["Anio"] = (
+        df_generacion["Fecha"].dt.year
     )
 
-    df_bess = (
-        df_mediciones
-        .groupby("Fecha", as_index=False)
+    df_generacion["Mes"] = (
+        df_generacion["Fecha"].dt.month
+    )
+
+    resumen_mensual = (
+        df_generacion
+        .groupby(
+            [
+                "Anio",
+                "Mes",
+                "Proyecto"
+            ],
+            as_index=False
+        )
         .agg(
-            Energia_kWh=(
-                "Energia_kWh",
+            Generacion_MWh=(
+                "Generacion_MWh",
                 "sum"
             )
         )
-        .sort_values("Fecha")
+        .sort_values(
+            [
+                "Proyecto",
+                "Anio",
+                "Mes"
+            ]
+        )
     )
 
-    return df_bess, sorted(set(advertencias))
+    return (
+        resumen_mensual,
+        sorted(set(advertencias))
+    )
 
 
 # =========================================================
-# CONSULTA API CMG
+# LECTURA DE BUDGETS DE PROYECTOS
+# =========================================================
+
+@st.cache_data(
+    ttl=DOCE_HORAS_SEGUNDOS,
+    show_spinner=False
+)
+def cargar_budgets_proyectos():
+    df = pd.read_excel(
+        ARCHIVO_EXCEL,
+        sheet_name=HOJA_BUDGETS_PROYECTOS,
+        engine="openpyxl"
+    )
+
+    df = normalizar_columnas_excel(df)
+
+    requeridas = [
+        "Anio",
+        "Mes",
+        "Proyecto",
+        "Budget_Generacion_MWh"
+    ]
+
+    faltantes = [
+        columna
+        for columna in requeridas
+        if columna not in df.columns
+    ]
+
+    if faltantes:
+        raise ValueError(
+            "Faltan columnas en Budgets_Proyectos: "
+            + ", ".join(faltantes)
+        )
+
+    df = df[requeridas].copy()
+
+    df["Anio"] = convertir_numerico(
+        df["Anio"]
+    )
+
+    df["Mes"] = convertir_numerico(
+        df["Mes"]
+    )
+
+    df["Budget_Generacion_MWh"] = (
+        convertir_numerico(
+            df["Budget_Generacion_MWh"]
+        )
+    )
+
+    df["Proyecto"] = (
+        df["Proyecto"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    df = df.dropna(
+        subset=[
+            "Anio",
+            "Mes",
+            "Proyecto"
+        ]
+    )
+
+    df["Anio"] = df["Anio"].astype(int)
+    df["Mes"] = df["Mes"].astype(int)
+
+    if not df["Mes"].between(1, 12).all():
+        raise ValueError(
+            "Budgets_Proyectos contiene meses "
+            "fuera del rango 1 a 12."
+        )
+
+    if df[
+        "Budget_Generacion_MWh"
+    ].isna().any():
+        raise ValueError(
+            "Budgets_Proyectos contiene budgets "
+            "vacíos o no numéricos."
+        )
+
+    nombres_validos = set(
+        PROYECTOS_GENERACION.keys()
+    )
+
+    nombres_excel = set(
+        df["Proyecto"].unique()
+    )
+
+    desconocidos = sorted(
+        nombres_excel - nombres_validos
+    )
+
+    if desconocidos:
+        raise ValueError(
+            "Hay proyectos no reconocidos en "
+            "Budgets_Proyectos: "
+            + ", ".join(desconocidos)
+        )
+
+    duplicados = df.duplicated(
+        subset=[
+            "Anio",
+            "Mes",
+            "Proyecto"
+        ],
+        keep=False
+    )
+
+    if duplicados.any():
+        raise ValueError(
+            "Existen budgets duplicados para el mismo "
+            "año, mes y proyecto."
+        )
+
+    return df
+
+
+# =========================================================
+# BUDGETS Y CONSOLIDADO DEL BESS
+# =========================================================
+
+@st.cache_data(
+    ttl=DOCE_HORAS_SEGUNDOS,
+    show_spinner=False
+)
+def cargar_budgets_bess():
+    df = pd.read_excel(
+        ARCHIVO_EXCEL,
+        sheet_name=HOJA_BUDGETS_BESS,
+        engine="openpyxl"
+    )
+
+    df = normalizar_columnas_excel(df)
+
+    requeridas = [
+        "Anio",
+        "Mes",
+        "Budget_Generacion_MWh",
+        "Budget_PPA_MWh"
+    ]
+
+    faltantes = [
+        columna
+        for columna in requeridas
+        if columna not in df.columns
+    ]
+
+    if faltantes:
+        raise ValueError(
+            "Faltan columnas en Budgets: "
+            + ", ".join(faltantes)
+        )
+
+    df = df[requeridas].copy()
+
+    for columna in requeridas:
+        df[columna] = convertir_numerico(
+            df[columna]
+        )
+
+    df = df.dropna(
+        subset=["Anio", "Mes"]
+    )
+
+    df["Anio"] = df["Anio"].astype(int)
+    df["Mes"] = df["Mes"].astype(int)
+
+    return df
+
+
+@st.cache_data(
+    ttl=DOCE_HORAS_SEGUNDOS,
+    show_spinner=False
+)
+def cargar_consolidado_bess():
+    df = pd.read_excel(
+        ARCHIVO_EXCEL,
+        sheet_name=HOJA_CONSOLIDADO_BESS,
+        engine="openpyxl"
+    )
+
+    df = normalizar_columnas_excel(df)
+
+    requeridas = [
+        "Anio",
+        "Mes",
+        "Energia_PPA_MWh",
+        "Energia_Spot_MWh",
+        "Ingreso_PPA_USD",
+        "Ingreso_Spot_USD"
+    ]
+
+    faltantes = [
+        columna
+        for columna in requeridas
+        if columna not in df.columns
+    ]
+
+    if faltantes:
+        raise ValueError(
+            "Faltan columnas en Consolidado: "
+            + ", ".join(faltantes)
+        )
+
+    df = df[requeridas].copy()
+
+    for columna in requeridas:
+        df[columna] = convertir_numerico(
+            df[columna]
+        )
+
+    df = df.dropna(
+        subset=["Anio", "Mes"]
+    )
+
+    df["Anio"] = df["Anio"].astype(int)
+    df["Mes"] = df["Mes"].astype(int)
+
+    df["Energia_Total_MWh"] = (
+        df["Energia_PPA_MWh"]
+        + df["Energia_Spot_MWh"]
+    )
+
+    df["Ingreso_Total_USD"] = (
+        df["Ingreso_PPA_USD"]
+        + df["Ingreso_Spot_USD"]
+    )
+
+    df["Fuente"] = "Excel consolidado"
+
+    return df
+
+
+# =========================================================
+# CMG PARA EL BESS
 # =========================================================
 
 def descargar_cmg_mes(periodo):
     anio = int(periodo[:4])
     mes = int(periodo[4:6])
 
-    ultimo_dia_numero = calendar.monthrange(
+    ultimo_dia = calendar.monthrange(
         anio,
         mes
     )[1]
 
-    fecha_inicio_mes = pd.Timestamp(
+    inicio = pd.Timestamp(
         year=anio,
         month=mes,
         day=1
     )
 
-    fecha_fin_mes = pd.Timestamp(
+    fin = pd.Timestamp(
         year=anio,
         month=mes,
-        day=ultimo_dia_numero
+        day=ultimo_dia
     )
 
-    hoy = pd.Timestamp.now().normalize()
+    hoy_normalizado = pd.Timestamp.now().normalize()
 
     if (
-        anio == hoy.year
-        and mes == hoy.month
+        anio == hoy_normalizado.year
+        and mes == hoy_normalizado.month
     ):
-        fecha_fin_mes = min(
-            fecha_fin_mes,
-            hoy
-        )
+        fin = min(fin, hoy_normalizado)
 
     registros = []
     pagina = 0
 
     while True:
         params = {
-            "startDate": fecha_inicio_mes.strftime(
-                "%Y-%m-%d"
-            ),
-            "endDate": fecha_fin_mes.strftime(
-                "%Y-%m-%d"
-            ),
+            "startDate": inicio.strftime("%Y-%m-%d"),
+            "endDate": fin.strftime("%Y-%m-%d"),
             "page": pagina,
             "limit": 5000,
             "type": TIPO_CMG,
-            "bar_transf": BARRA_CMG,
+            "bar_transf": BARRA_CMG_BESS,
             "user_key": API_KEY_CMG
         }
 
@@ -821,7 +899,10 @@ def descargar_cmg_mes(periodo):
             if respuesta.status_code != 200:
                 return None
 
-            contenido = respuesta.json()
+            datos = respuesta.json().get(
+                "data",
+                []
+            )
 
         except (
             requests.RequestException,
@@ -829,17 +910,12 @@ def descargar_cmg_mes(periodo):
         ):
             return None
 
-        datos_pagina = contenido.get(
-            "data",
-            []
-        )
-
-        if not datos_pagina:
+        if not datos:
             break
 
-        registros.extend(datos_pagina)
+        registros.extend(datos)
 
-        if len(datos_pagina) < 5000:
+        if len(datos) < 5000:
             break
 
         pagina += 1
@@ -849,9 +925,9 @@ def descargar_cmg_mes(periodo):
             columns=["Fecha", "CMG_USD_MWh"]
         )
 
-    df_cmg = pd.DataFrame(registros)
+    df = pd.DataFrame(registros)
 
-    columnas_requeridas = [
+    necesarias = [
         "fecha",
         "hra",
         "min",
@@ -859,42 +935,40 @@ def descargar_cmg_mes(periodo):
     ]
 
     if not all(
-        columna in df_cmg.columns
-        for columna in columnas_requeridas
+        columna in df.columns
+        for columna in necesarias
     ):
         return None
 
-    df_cmg["hra"] = pd.to_numeric(
-        df_cmg["hra"],
-        errors="coerce"
+    df["hra"] = convertir_numerico(
+        df["hra"]
     ).fillna(0)
 
-    df_cmg["min"] = pd.to_numeric(
-        df_cmg["min"],
-        errors="coerce"
+    df["min"] = convertir_numerico(
+        df["min"]
     ).fillna(0)
 
-    df_cmg["CMG_USD_MWh"] = convertir_numerico(
-        df_cmg["cmg_usd_mwh_"]
+    df["CMG_USD_MWh"] = convertir_numerico(
+        df["cmg_usd_mwh_"]
     ).fillna(0)
 
-    df_cmg["Fecha"] = (
+    df["Fecha"] = (
         pd.to_datetime(
-            df_cmg["fecha"],
+            df["fecha"],
             errors="coerce"
         )
         + pd.to_timedelta(
-            df_cmg["hra"],
+            df["hra"],
             unit="h"
         )
         + pd.to_timedelta(
-            df_cmg["min"],
+            df["min"],
             unit="m"
         )
     )
 
-    df_cmg = (
-        df_cmg[
+    return (
+        df[
             ["Fecha", "CMG_USD_MWh"]
         ]
         .dropna(subset=["Fecha"])
@@ -905,441 +979,396 @@ def descargar_cmg_mes(periodo):
                 "mean"
             )
         )
-        .sort_values("Fecha")
     )
 
-    return df_cmg
 
+# =========================================================
+# DESCARGA Y PROCESAMIENTO DEL BESS PENDIENTE
+# =========================================================
 
 @st.cache_data(
     ttl=DOCE_HORAS_SEGUNDOS,
     show_spinner=False
 )
-def descargar_cmg_periodos(periodos):
-    dataframes = []
+def procesar_bess_api(periodos):
+    resumenes_mensuales = []
+    resumenes_diarios = []
     advertencias = []
 
     for periodo in periodos:
-        resultado = descargar_cmg_mes(
-            periodo
+        registros_bess = []
+        mpids_correctos = 0
+
+        for mpid in BESS_MPIDS:
+            datos = obtener_datos_prmte(
+                periodo + "012345",
+                mpid,
+                3
+            )
+
+            if datos is None:
+                advertencias.append(
+                    f"BESS, {periodo_a_texto(periodo)}: "
+                    f"sin respuesta para {mpid}."
+                )
+                continue
+
+            registros = extraer_mediciones(
+                datos,
+                3
+            )
+
+            if registros:
+                mpids_correctos += 1
+                registros_bess.extend(registros)
+
+        if mpids_correctos != len(BESS_MPIDS):
+            advertencias.append(
+                f"BESS, {periodo_a_texto(periodo)} "
+                "no se procesó porque faltan medidores."
+            )
+            continue
+
+        if not registros_bess:
+            continue
+
+        df_bess = pd.DataFrame(registros_bess)
+
+        df_bess["Fecha"] = parse_fecha_safe(
+            df_bess["Fecha"]
         )
 
-        if resultado is None:
+        df_bess["Energia_kWh"] = (
+            convertir_numerico(
+                df_bess["Energia_kWh"]
+            )
+            .fillna(0)
+        )
+
+        df_bess = (
+            df_bess
+            .dropna(subset=["Fecha"])
+            .groupby("Fecha", as_index=False)
+            .agg(
+                Energia_kWh=(
+                    "Energia_kWh",
+                    "sum"
+                )
+            )
+        )
+
+        df_cmg = descargar_cmg_mes(periodo)
+
+        if df_cmg is None or df_cmg.empty:
             advertencias.append(
-                f"{periodo_a_texto(periodo)}: "
+                f"BESS, {periodo_a_texto(periodo)}: "
                 "CMG no disponible."
             )
-
             continue
 
-        if resultado.empty:
-            advertencias.append(
-                f"{periodo_a_texto(periodo)}: "
-                "CMG sin registros."
+        df_bess = df_bess.merge(
+            df_cmg,
+            on="Fecha",
+            how="left"
+        )
+
+        df_bess["CMG_USD_MWh"] = (
+            df_bess["CMG_USD_MWh"]
+            .fillna(0)
+        )
+
+        df_bess["Energia_MWh"] = (
+            df_bess["Energia_kWh"].abs()
+            / 1000
+        )
+
+        df_bess["Tipo_Contrato"] = "PPA"
+
+        df_bess.loc[
+            (
+                df_bess["Fecha"].dt.hour >= 6
             )
-
-            continue
-
-        dataframes.append(resultado)
-
-    if not dataframes:
-        return (
-            pd.DataFrame(
-                columns=["Fecha", "CMG_USD_MWh"]
+            & (
+                df_bess["Fecha"].dt.hour < 21
             ),
-            sorted(set(advertencias))
+            "Tipo_Contrato"
+        ] = "SPOT"
+
+        df_bess["Precio_Aplicado"] = (
+            PRECIO_PPA
         )
 
-    df_cmg = (
-        pd.concat(
-            dataframes,
-            ignore_index=True
+        df_bess.loc[
+            df_bess["Tipo_Contrato"] == "SPOT",
+            "Precio_Aplicado"
+        ] = df_bess["CMG_USD_MWh"]
+
+        df_bess["Ingreso_USD"] = (
+            df_bess["Energia_MWh"]
+            * df_bess["Precio_Aplicado"]
         )
-        .groupby("Fecha", as_index=False)
-        .agg(
-            CMG_USD_MWh=(
-                "CMG_USD_MWh",
-                "mean"
+
+        df_bess["Fecha_Dia"] = (
+            df_bess["Fecha"].dt.normalize()
+        )
+
+        df_bess["Anio"] = (
+            df_bess["Fecha"].dt.year
+        )
+
+        df_bess["Mes"] = (
+            df_bess["Fecha"].dt.month
+        )
+
+        diario = (
+            df_bess
+            .groupby(
+                [
+                    "Fecha_Dia",
+                    "Tipo_Contrato"
+                ],
+                as_index=False
+            )
+            .agg(
+                Energia_MWh=(
+                    "Energia_MWh",
+                    "sum"
+                )
             )
         )
-        .sort_values("Fecha")
-    )
 
-    return df_cmg, sorted(set(advertencias))
-
-
-# =========================================================
-# CARGA Y VALIDACION DEL EXCEL
-# =========================================================
-
-try:
-    df_budgets = cargar_budgets()
-    df_consolidado_excel = (
-        cargar_consolidado_excel()
-    )
-
-except Exception as error:
-    st.error(
-        "No fue posible validar budgets.xlsx."
-    )
-
-    st.info(str(error))
-
-    st.stop()
-
-
-(
-    periodos_totales,
-    periodos_consolidados,
-    periodos_pendientes
-) = determinar_periodos(
-    FECHA_INICIO,
-    FECHA_FIN,
-    df_consolidado_excel
-)
-
-
-# =========================================================
-# ESTADO DE LAS FUENTES
-# =========================================================
-
-with st.expander(
-    "Estado de las fuentes de información",
-    expanded=False
-):
-    st.markdown(
-        "**Meses tomados desde el Excel:**"
-    )
-
-    if periodos_consolidados:
-        st.write(
-            ", ".join(
-                periodo_a_texto(periodo)
-                for periodo in periodos_consolidados
+        diario = (
+            diario
+            .pivot_table(
+                index="Fecha_Dia",
+                columns="Tipo_Contrato",
+                values="Energia_MWh",
+                aggfunc="sum",
+                fill_value=0
             )
+            .reset_index()
         )
-    else:
-        st.write("Ninguno")
 
-    st.markdown(
-        "**Meses que se consultarán automáticamente "
-        "desde las API:**"
-    )
+        diario.columns.name = None
 
-    if periodos_pendientes:
-        st.write(
-            ", ".join(
-                periodo_a_texto(periodo)
-                for periodo in periodos_pendientes
-            )
-        )
-    else:
-        st.write("Ninguno")
+        if "PPA" not in diario.columns:
+            diario["PPA"] = 0
 
+        if "SPOT" not in diario.columns:
+            diario["SPOT"] = 0
 
-# =========================================================
-# DESCARGA DE PERIODOS PENDIENTES
-# =========================================================
-
-with st.spinner(
-    "Consultando períodos pendientes en las API..."
-):
-    df_bess, advertencias_prmte = (
-        descargar_bess_periodos(
-            periodos_pendientes
-        )
-    )
-
-    df_cmg, advertencias_cmg = (
-        descargar_cmg_periodos(
-            periodos_pendientes
-        )
-    )
-
-
-advertencias_api = sorted(
-    set(
-        advertencias_prmte
-        + advertencias_cmg
-    )
-)
-
-if advertencias_api:
-    st.warning(
-        "Algunas consultas no estuvieron disponibles. "
-        "El dashboard continuará con la información válida."
-    )
-
-    with st.expander(
-        "Ver advertencias de las API"
-    ):
-        for advertencia in advertencias_api:
-            st.write(
-                f"- {advertencia}"
-            )
-
-
-# =========================================================
-# PROCESAMIENTO DE LA API
-# =========================================================
-
-df_api = pd.DataFrame()
-resumen_diario_api = pd.DataFrame()
-resumen_mensual_api = pd.DataFrame()
-
-if not df_bess.empty:
-    df_api = pd.merge(
-        df_bess,
-        df_cmg,
-        on="Fecha",
-        how="left"
-    )
-
-    df_api["CMG_USD_MWh"] = (
-        df_api["CMG_USD_MWh"]
-        .fillna(0)
-    )
-
-    df_api["Energia_MWh"] = (
-        pd.to_numeric(
-            df_api["Energia_kWh"],
-            errors="coerce"
-        )
-        .fillna(0)
-        .abs()
-        / 1000
-    )
-
-    # PPA: 21:00 a 05:59
-    # Spot: 06:00 a 20:59
-
-    df_api["Tipo_Contrato"] = "PPA"
-
-    df_api.loc[
-        (
-            df_api["Fecha"].dt.hour >= 6
-        )
-        & (
-            df_api["Fecha"].dt.hour < 21
-        ),
-        "Tipo_Contrato"
-    ] = "SPOT"
-
-    df_api["Precio_Aplicado_USD_MWh"] = (
-        PRECIO_PPA
-    )
-
-    df_api.loc[
-        df_api["Tipo_Contrato"] == "SPOT",
-        "Precio_Aplicado_USD_MWh"
-    ] = df_api["CMG_USD_MWh"]
-
-    df_api["Ingreso_USD"] = (
-        df_api["Energia_MWh"]
-        * df_api["Precio_Aplicado_USD_MWh"]
-    )
-
-    df_api["Fecha_Dia"] = (
-        df_api["Fecha"].dt.normalize()
-    )
-
-    df_api["Anio"] = (
-        df_api["Fecha"].dt.year
-    )
-
-    df_api["Mes"] = (
-        df_api["Fecha"].dt.month
-    )
-
-    # -----------------------------------------------------
-    # RESUMEN DIARIO
-    # -----------------------------------------------------
-
-    diario_largo = (
-        df_api
-        .groupby(
-            [
-                "Fecha_Dia",
-                "Tipo_Contrato"
-            ],
-            as_index=False
-        )
-        .agg(
-            Energia_MWh=(
-                "Energia_MWh",
-                "sum"
-            )
-        )
-    )
-
-    resumen_diario_api = (
-        diario_largo
-        .pivot_table(
-            index="Fecha_Dia",
-            columns="Tipo_Contrato",
-            values="Energia_MWh",
-            aggfunc="sum",
-            fill_value=0
-        )
-        .reset_index()
-    )
-
-    resumen_diario_api.columns.name = None
-
-    if "PPA" not in resumen_diario_api.columns:
-        resumen_diario_api["PPA"] = 0
-
-    if "SPOT" not in resumen_diario_api.columns:
-        resumen_diario_api["SPOT"] = 0
-
-    resumen_diario_api = (
-        resumen_diario_api.rename(
+        diario = diario.rename(
             columns={
                 "PPA": "Energia_PPA_MWh",
                 "SPOT": "Energia_Spot_MWh"
             }
         )
-    )
 
-    resumen_diario_api[
-        "Energia_Total_MWh"
-    ] = (
-        resumen_diario_api[
-            "Energia_PPA_MWh"
-        ]
-        + resumen_diario_api[
-            "Energia_Spot_MWh"
-        ]
-    )
+        resumenes_diarios.append(diario)
 
-    # -----------------------------------------------------
-    # RESUMEN MENSUAL
-    # -----------------------------------------------------
-
-    mensual_largo = (
-        df_api
-        .groupby(
-            [
-                "Anio",
-                "Mes",
-                "Tipo_Contrato"
-            ],
-            as_index=False
-        )
-        .agg(
-            Energia_MWh=(
-                "Energia_MWh",
-                "sum"
-            ),
-            Ingreso_USD=(
-                "Ingreso_USD",
-                "sum"
+        mensual = (
+            df_bess
+            .groupby(
+                [
+                    "Anio",
+                    "Mes",
+                    "Tipo_Contrato"
+                ],
+                as_index=False
+            )
+            .agg(
+                Energia_MWh=(
+                    "Energia_MWh",
+                    "sum"
+                ),
+                Ingreso_USD=(
+                    "Ingreso_USD",
+                    "sum"
+                )
             )
         )
-    )
 
-    energia_mensual = (
-        mensual_largo
-        .pivot_table(
-            index=["Anio", "Mes"],
-            columns="Tipo_Contrato",
-            values="Energia_MWh",
-            aggfunc="sum",
-            fill_value=0
+        energia = (
+            mensual
+            .pivot_table(
+                index=["Anio", "Mes"],
+                columns="Tipo_Contrato",
+                values="Energia_MWh",
+                fill_value=0
+            )
+            .reset_index()
         )
-        .reset_index()
-    )
 
-    energia_mensual.columns.name = None
-
-    if "PPA" not in energia_mensual.columns:
-        energia_mensual["PPA"] = 0
-
-    if "SPOT" not in energia_mensual.columns:
-        energia_mensual["SPOT"] = 0
-
-    energia_mensual = energia_mensual.rename(
-        columns={
-            "PPA": "Energia_PPA_MWh",
-            "SPOT": "Energia_Spot_MWh"
-        }
-    )
-
-    ingreso_mensual = (
-        mensual_largo
-        .pivot_table(
-            index=["Anio", "Mes"],
-            columns="Tipo_Contrato",
-            values="Ingreso_USD",
-            aggfunc="sum",
-            fill_value=0
+        ingreso = (
+            mensual
+            .pivot_table(
+                index=["Anio", "Mes"],
+                columns="Tipo_Contrato",
+                values="Ingreso_USD",
+                fill_value=0
+            )
+            .reset_index()
         )
-        .reset_index()
+
+        energia.columns.name = None
+        ingreso.columns.name = None
+
+        for columna in ["PPA", "SPOT"]:
+            if columna not in energia.columns:
+                energia[columna] = 0
+
+            if columna not in ingreso.columns:
+                ingreso[columna] = 0
+
+        energia = energia.rename(
+            columns={
+                "PPA": "Energia_PPA_MWh",
+                "SPOT": "Energia_Spot_MWh"
+            }
+        )
+
+        ingreso = ingreso.rename(
+            columns={
+                "PPA": "Ingreso_PPA_USD",
+                "SPOT": "Ingreso_Spot_USD"
+            }
+        )
+
+        resumen = energia.merge(
+            ingreso,
+            on=["Anio", "Mes"],
+            how="outer"
+        ).fillna(0)
+
+        resumen["Energia_Total_MWh"] = (
+            resumen["Energia_PPA_MWh"]
+            + resumen["Energia_Spot_MWh"]
+        )
+
+        resumen["Ingreso_Total_USD"] = (
+            resumen["Ingreso_PPA_USD"]
+            + resumen["Ingreso_Spot_USD"]
+        )
+
+        resumen["Fuente"] = "API"
+
+        resumenes_mensuales.append(resumen)
+
+    mensual_final = (
+        pd.concat(
+            resumenes_mensuales,
+            ignore_index=True
+        )
+        if resumenes_mensuales
+        else pd.DataFrame()
     )
 
-    ingreso_mensual.columns.name = None
-
-    if "PPA" not in ingreso_mensual.columns:
-        ingreso_mensual["PPA"] = 0
-
-    if "SPOT" not in ingreso_mensual.columns:
-        ingreso_mensual["SPOT"] = 0
-
-    ingreso_mensual = ingreso_mensual.rename(
-        columns={
-            "PPA": "Ingreso_PPA_USD",
-            "SPOT": "Ingreso_Spot_USD"
-        }
+    diario_final = (
+        pd.concat(
+            resumenes_diarios,
+            ignore_index=True
+        )
+        if resumenes_diarios
+        else pd.DataFrame()
     )
 
-    resumen_mensual_api = pd.merge(
-        energia_mensual,
-        ingreso_mensual,
-        on=["Anio", "Mes"],
-        how="outer"
-    ).fillna(0)
-
-    resumen_mensual_api[
-        "Energia_Total_MWh"
-    ] = (
-        resumen_mensual_api[
-            "Energia_PPA_MWh"
-        ]
-        + resumen_mensual_api[
-            "Energia_Spot_MWh"
-        ]
+    return (
+        mensual_final,
+        diario_final,
+        sorted(set(advertencias))
     )
-
-    resumen_mensual_api[
-        "Ingreso_Total_USD"
-    ] = (
-        resumen_mensual_api[
-            "Ingreso_PPA_USD"
-        ]
-        + resumen_mensual_api[
-            "Ingreso_Spot_USD"
-        ]
-    )
-
-    resumen_mensual_api[
-        "Precio_Promedio_USD_MWh"
-    ] = (
-        resumen_mensual_api[
-            "Ingreso_Total_USD"
-        ]
-        / resumen_mensual_api[
-            "Energia_Total_MWh"
-        ].replace(0, pd.NA)
-    ).fillna(0)
-
-    resumen_mensual_api["Fuente"] = "API"
 
 
 # =========================================================
-# UNION DEL EXCEL Y LA API
+# VALIDACION DEL ARCHIVO EXCEL
 # =========================================================
 
-columnas_finales = [
+try:
+    df_budgets_bess = cargar_budgets_bess()
+    df_consolidado_bess = cargar_consolidado_bess()
+    df_budgets_proyectos = cargar_budgets_proyectos()
+
+except Exception as error:
+    st.error(
+        "No fue posible validar budgets.xlsx."
+    )
+    st.info(str(error))
+    st.stop()
+
+
+# =========================================================
+# DESCARGAR OTROS PROYECTOS
+# =========================================================
+
+with st.spinner(
+    "Consultando generación de proyectos..."
+):
+    (
+        df_generacion_proyectos,
+        advertencias_proyectos
+    ) = descargar_generacion_proyectos(
+        PERIODOS_ANIO
+    )
+
+
+if advertencias_proyectos:
+    st.warning(
+        "Algunas mediciones de proyectos no estuvieron "
+        "disponibles."
+    )
+
+    with st.expander(
+        "Ver advertencias de proyectos"
+    ):
+        for advertencia in advertencias_proyectos:
+            st.write(f"- {advertencia}")
+
+
+# =========================================================
+# DESCARGAR BESS SOLO PARA MESES NO CONSOLIDADOS
+# =========================================================
+
+periodos_excel_bess = {
+    f"{int(fila.Anio):04d}{int(fila.Mes):02d}"
+    for fila in df_consolidado_bess.itertuples()
+}
+
+periodos_pendientes_bess = [
+    periodo
+    for periodo in PERIODOS_ANIO
+    if periodo not in periodos_excel_bess
+]
+
+with st.spinner(
+    "Consultando períodos pendientes del BESS..."
+):
+    (
+        df_bess_api,
+        df_bess_diario,
+        advertencias_bess
+    ) = procesar_bess_api(
+        periodos_pendientes_bess
+    )
+
+
+if advertencias_bess:
+    st.warning(
+        "Algunos períodos del BESS no estuvieron "
+        "disponibles."
+    )
+
+    with st.expander(
+        "Ver advertencias del BESS"
+    ):
+        for advertencia in advertencias_bess:
+            st.write(f"- {advertencia}")
+
+
+# =========================================================
+# UNIR CONSOLIDADO BESS CON API
+# =========================================================
+
+columnas_bess = [
     "Anio",
     "Mes",
     "Energia_PPA_MWh",
@@ -1348,44 +1377,34 @@ columnas_finales = [
     "Ingreso_PPA_USD",
     "Ingreso_Spot_USD",
     "Ingreso_Total_USD",
-    "Precio_Promedio_USD_MWh",
     "Fuente"
 ]
 
-fuentes = [
-    df_consolidado_excel[
-        columnas_finales
-    ]
+fuentes_bess = [
+    df_consolidado_bess[columnas_bess]
 ]
 
-if not resumen_mensual_api.empty:
-    fuentes.append(
-        resumen_mensual_api[
-            columnas_finales
-        ]
+if not df_bess_api.empty:
+    fuentes_bess.append(
+        df_bess_api[columnas_bess]
     )
 
-resumen_mensual_final = pd.concat(
-    fuentes,
+df_bess_final = pd.concat(
+    fuentes_bess,
     ignore_index=True
 )
 
-# El Excel siempre tiene prioridad si por alguna razón
-# el mismo mes aparece también en la API.
-
-resumen_mensual_final["Prioridad"] = (
-    resumen_mensual_final["Fuente"]
-    .apply(
-        lambda valor: (
-            2
-            if valor == "Excel consolidado"
-            else 1
-        )
-    )
+df_bess_final["Prioridad"] = (
+    df_bess_final["Fuente"]
+    .map({
+        "API": 1,
+        "Excel consolidado": 2
+    })
+    .fillna(2)
 )
 
-resumen_mensual_final = (
-    resumen_mensual_final
+df_bess_final = (
+    df_bess_final
     .sort_values("Prioridad")
     .drop_duplicates(
         subset=["Anio", "Mes"],
@@ -1393,316 +1412,407 @@ resumen_mensual_final = (
     )
     .drop(columns=["Prioridad"])
     .sort_values(["Anio", "Mes"])
-    .reset_index(drop=True)
 )
 
 
 # =========================================================
-# FILTRO ANUAL
+# FILTROS
 # =========================================================
 
 st.sidebar.header("Filtros")
 
-anios_disponibles = sorted(
-    resumen_mensual_final["Anio"]
-    .unique()
-    .tolist(),
-    reverse=True
-)
-
 anio_seleccionado = st.sidebar.selectbox(
     "Año",
-    options=anios_disponibles,
+    options=[ANIO_OPERACIONAL],
     index=0
 )
 
-resumen_anio = resumen_mensual_final[
-    resumen_mensual_final["Anio"]
-    == anio_seleccionado
-].copy()
-
 
 # =========================================================
-# INDICADORES ANUALES
+# SECCION OTROS PROYECTOS
 # =========================================================
 
-energia_total_anual = (
-    resumen_anio["Energia_Total_MWh"]
-    .sum()
+st.header("Generación mensual de proyectos")
+
+proyectos_disponibles = sorted(
+    PROYECTOS_GENERACION.keys()
 )
 
-energia_ppa_anual = (
-    resumen_anio["Energia_PPA_MWh"]
-    .sum()
+proyecto_seleccionado = st.selectbox(
+    "Selecciona un proyecto",
+    options=proyectos_disponibles
 )
 
-energia_spot_anual = (
-    resumen_anio["Energia_Spot_MWh"]
-    .sum()
-)
-
-ingreso_total_anual = (
-    resumen_anio["Ingreso_Total_USD"]
-    .sum()
-)
-
-col1, col2, col3, col4 = st.columns(4)
-
-col1.metric(
-    "Energía BESS acumulada",
-    f"{energia_total_anual:,.1f} MWh"
-)
-
-col2.metric(
-    "Energía PPA acumulada",
-    f"{energia_ppa_anual:,.1f} MWh"
-)
-
-col3.metric(
-    "Energía Spot acumulada",
-    f"{energia_spot_anual:,.1f} MWh"
-)
-
-col4.metric(
-    "Ingreso acumulado",
-    f"USD {ingreso_total_anual:,.0f}"
-)
-
-
-# =========================================================
-# GRAFICO DIARIO
-# =========================================================
-
-st.subheader(
-    "Distribución diaria de energía"
-)
-
-if resumen_diario_api.empty:
-    st.info(
-        "No hay información diaria disponible desde las API. "
-        "Los meses del Excel contienen totales mensuales."
-    )
-
-else:
-    meses_diarios = (
-        resumen_diario_api
-        .assign(
-            Anio=resumen_diario_api[
-                "Fecha_Dia"
-            ].dt.year,
-            Mes=resumen_diario_api[
-                "Fecha_Dia"
-            ].dt.month
-        )
-        [["Anio", "Mes"]]
-        .drop_duplicates()
-        .sort_values(
-            ["Anio", "Mes"],
-            ascending=False
-        )
-    )
-
-    opciones_diarias = [
+datos_proyecto = (
+    df_generacion_proyectos[
         (
-            int(fila.Anio),
-            int(fila.Mes)
-        )
-        for fila in meses_diarios.itertuples()
-    ]
-
-    seleccion_diaria = st.sidebar.selectbox(
-        "Mes para gráfico diario",
-        options=opciones_diarias,
-        format_func=lambda valor: (
-            f"{MESES_COMPLETOS[valor[1]]} "
-            f"{valor[0]}"
-        )
-    )
-
-    anio_diario = seleccion_diaria[0]
-    mes_diario = seleccion_diaria[1]
-
-    diario_mes = resumen_diario_api[
-        (
-            resumen_diario_api[
-                "Fecha_Dia"
-            ].dt.year == anio_diario
+            df_generacion_proyectos["Proyecto"]
+            == proyecto_seleccionado
         )
         & (
-            resumen_diario_api[
-                "Fecha_Dia"
-            ].dt.month == mes_diario
+            df_generacion_proyectos["Anio"]
+            == anio_seleccionado
         )
-    ].copy()
-
-    primer_dia = pd.Timestamp(
-        year=anio_diario,
-        month=mes_diario,
-        day=1
-    )
-
-    ultimo_dia_numero = calendar.monthrange(
-        anio_diario,
-        mes_diario
-    )[1]
-
-    ultimo_dia = pd.Timestamp(
-        year=anio_diario,
-        month=mes_diario,
-        day=ultimo_dia_numero
-    )
-
-    hoy = pd.Timestamp.now().normalize()
-
-    if (
-        anio_diario == hoy.year
-        and mes_diario == hoy.month
-    ):
-        ultimo_dia = min(
-            ultimo_dia,
-            hoy
-        )
-
-    calendario_mes = pd.DataFrame({
-        "Fecha_Dia": pd.date_range(
-            start=primer_dia,
-            end=ultimo_dia,
-            freq="D"
-        )
-    })
-
-    diario_mes = calendario_mes.merge(
-        diario_mes,
-        on="Fecha_Dia",
-        how="left"
-    )
-
-    columnas_diarias = [
-        "Energia_PPA_MWh",
-        "Energia_Spot_MWh",
-        "Energia_Total_MWh"
     ]
-
-    diario_mes[columnas_diarias] = (
-        diario_mes[columnas_diarias]
-        .fillna(0)
-    )
-
-    ancho_barra = (
-        0.40 * 24 * 60 * 60 * 1000
-    )
-
-    fig_diario = go.Figure()
-
-    fig_diario.add_trace(
-        go.Bar(
-            x=diario_mes["Fecha_Dia"],
-            y=diario_mes[
-                "Energia_PPA_MWh"
-            ],
-            name="Energía PPA",
-            marker_color="#7DBCF0",
-            marker_line_color="#1683DB",
-            marker_line_width=0.5,
-            width=ancho_barra,
-            hovertemplate=(
-                "<b>%{x|%d-%m-%Y}</b><br>"
-                "PPA: %{y:,.2f} MWh"
-                "<extra></extra>"
-            )
-        )
-    )
-
-    fig_diario.add_trace(
-        go.Bar(
-            x=diario_mes["Fecha_Dia"],
-            y=diario_mes[
-                "Energia_Spot_MWh"
-            ],
-            name="Energía Spot",
-            marker_color="#0A69C7",
-            marker_line_color="#1683DB",
-            marker_line_width=0.5,
-            width=ancho_barra,
-            hovertemplate=(
-                "<b>%{x|%d-%m-%Y}</b><br>"
-                "Spot: %{y:,.2f} MWh"
-                "<extra></extra>"
-            )
-        )
-    )
-
-    fig_diario.update_layout(
-        barmode="stack",
-        title=(
-            f"{MESES_COMPLETOS[mes_diario]} "
-            f"{anio_diario}"
-        ),
-        xaxis_title="Día del mes",
-        yaxis_title="Energía [MWh]",
-        legend_title="Destino",
-        hovermode="x unified",
-        height=500,
-        bargap=0.50,
-        margin=dict(
-            l=30,
-            r=30,
-            t=50,
-            b=30
-        )
-    )
-
-    fig_diario.update_xaxes(
-        tickmode="linear",
-        dtick=24 * 60 * 60 * 1000,
-        tickformat="%d",
-        range=[
-            primer_dia
-            - pd.Timedelta(hours=12),
-            ultimo_dia
-            + pd.Timedelta(hours=12)
-        ],
-        showgrid=False
-    )
-
-    fig_diario.update_yaxes(
-        rangemode="tozero",
-        gridcolor=(
-            "rgba(140, 140, 140, 0.25)"
-        )
-    )
-
-    st.plotly_chart(
-        fig_diario,
-        use_container_width=True
-    )
-
-
-# =========================================================
-# GRAFICO CONSOLIDADO ANUAL
-# =========================================================
-
-st.subheader(
-    f"Consolidado anual {anio_seleccionado}"
+    .copy()
 )
 
-consolidado_anual = pd.DataFrame({
+budget_proyecto = (
+    df_budgets_proyectos[
+        (
+            df_budgets_proyectos["Proyecto"]
+            == proyecto_seleccionado
+        )
+        & (
+            df_budgets_proyectos["Anio"]
+            == anio_seleccionado
+        )
+    ]
+    .copy()
+)
+
+consolidado_proyecto = pd.DataFrame({
     "Mes": range(1, 13)
 })
 
-consolidado_anual = consolidado_anual.merge(
-    resumen_anio,
-    on="Mes",
-    how="left"
+consolidado_proyecto = (
+    consolidado_proyecto
+    .merge(
+        datos_proyecto[
+            [
+                "Mes",
+                "Generacion_MWh"
+            ]
+        ],
+        on="Mes",
+        how="left"
+    )
+    .merge(
+        budget_proyecto[
+            [
+                "Mes",
+                "Budget_Generacion_MWh"
+            ]
+        ],
+        on="Mes",
+        how="left"
+    )
 )
 
-budgets_anio = df_budgets[
-    df_budgets["Anio"]
+consolidado_proyecto["Generacion_MWh"] = (
+    consolidado_proyecto["Generacion_MWh"]
+    .fillna(0)
+)
+
+consolidado_proyecto["Nombre_Mes"] = (
+    consolidado_proyecto["Mes"]
+    .map(NOMBRES_MESES)
+)
+
+meses_con_generacion = consolidado_proyecto[
+    consolidado_proyecto["Generacion_MWh"] > 0
+]
+
+if not meses_con_generacion.empty:
+    ultimo_mes = int(
+        meses_con_generacion["Mes"].max()
+    )
+
+    fila_ultimo_mes = (
+        consolidado_proyecto[
+            consolidado_proyecto["Mes"]
+            == ultimo_mes
+        ]
+        .iloc[0]
+    )
+
+    generacion_mes = (
+        fila_ultimo_mes["Generacion_MWh"]
+    )
+
+    budget_mes = (
+        fila_ultimo_mes[
+            "Budget_Generacion_MWh"
+        ]
+    )
+
+    cumplimiento_mes = (
+        generacion_mes / budget_mes * 100
+        if pd.notna(budget_mes)
+        and budget_mes > 0
+        else 0
+    )
+
+    generacion_acumulada = (
+        consolidado_proyecto.loc[
+            consolidado_proyecto["Mes"]
+            <= ultimo_mes,
+            "Generacion_MWh"
+        ]
+        .sum()
+    )
+
+    budget_acumulado = (
+        consolidado_proyecto.loc[
+            consolidado_proyecto["Mes"]
+            <= ultimo_mes,
+            "Budget_Generacion_MWh"
+        ]
+        .fillna(0)
+        .sum()
+    )
+
+    col_p1, col_p2, col_p3, col_p4 = (
+        st.columns(4)
+    )
+
+    col_p1.metric(
+        f"Generación {MESES_COMPLETOS[ultimo_mes]}",
+        f"{generacion_mes:,.1f} MWh"
+    )
+
+    col_p2.metric(
+        "Budget del mes",
+        (
+            f"{budget_mes:,.1f} MWh"
+            if pd.notna(budget_mes)
+            else "Sin budget"
+        )
+    )
+
+    col_p3.metric(
+        "Cumplimiento del mes",
+        f"{cumplimiento_mes:,.1f} %"
+    )
+
+    col_p4.metric(
+        "Generación acumulada",
+        f"{generacion_acumulada:,.1f} MWh"
+    )
+
+
+fig_proyecto = go.Figure()
+
+fig_proyecto.add_trace(
+    go.Bar(
+        x=consolidado_proyecto["Nombre_Mes"],
+        y=consolidado_proyecto[
+            "Generacion_MWh"
+        ],
+        name="Generación real",
+        marker_color="#1683DB",
+        width=0.55,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Generación: %{y:,.2f} MWh"
+            "<extra></extra>"
+        )
+    )
+)
+
+fig_proyecto.add_trace(
+    go.Scatter(
+        x=consolidado_proyecto["Nombre_Mes"],
+        y=consolidado_proyecto[
+            "Budget_Generacion_MWh"
+        ],
+        name="Budget generación",
+        mode="lines+markers",
+        line=dict(
+            color="#FF3B30",
+            width=3
+        ),
+        marker=dict(
+            size=8
+        ),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Budget: %{y:,.2f} MWh"
+            "<extra></extra>"
+        )
+    )
+)
+
+fig_proyecto.update_layout(
+    title=(
+        f"Generación mensual "
+        f"{proyecto_seleccionado}"
+    ),
+    xaxis_title="Mes",
+    yaxis_title="Generación [MWh]",
+    hovermode="x unified",
+    height=540,
+    bargap=0.35
+)
+
+fig_proyecto.update_yaxes(
+    rangemode="tozero",
+    gridcolor="rgba(140,140,140,0.25)"
+)
+
+st.plotly_chart(
+    fig_proyecto,
+    use_container_width=True
+)
+
+
+# =========================================================
+# GRAFICO DE CUMPLIMIENTO DE PROYECTOS
+# =========================================================
+
+consolidado_proyecto[
+    "Cumplimiento_Pct"
+] = (
+    consolidado_proyecto["Generacion_MWh"]
+    / consolidado_proyecto[
+        "Budget_Generacion_MWh"
+    ].replace(0, pd.NA)
+    * 100
+)
+
+fig_cumplimiento = go.Figure()
+
+fig_cumplimiento.add_trace(
+    go.Bar(
+        x=consolidado_proyecto["Nombre_Mes"],
+        y=consolidado_proyecto[
+            "Cumplimiento_Pct"
+        ],
+        name="Cumplimiento",
+        marker_color=[
+            (
+                "#149447"
+                if pd.notna(valor)
+                and valor >= 100
+                else "#D94141"
+            )
+            for valor in consolidado_proyecto[
+                "Cumplimiento_Pct"
+            ]
+        ],
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Cumplimiento: %{y:,.1f}%"
+            "<extra></extra>"
+        )
+    )
+)
+
+fig_cumplimiento.add_hline(
+    y=100,
+    line_dash="dash",
+    line_color="#111111",
+    annotation_text="Budget 100%"
+)
+
+fig_cumplimiento.update_layout(
+    title="Cumplimiento mensual de generación",
+    xaxis_title="Mes",
+    yaxis_title="Cumplimiento [%]",
+    height=430
+)
+
+fig_cumplimiento.update_yaxes(
+    range=[0, 120],
+    dtick=20,
+    ticksuffix="%"
+)
+
+st.plotly_chart(
+    fig_cumplimiento,
+    use_container_width=True
+)
+
+
+# =========================================================
+# SECCION BESS
+# =========================================================
+
+st.header("BESS María Elena")
+
+bess_anio = df_bess_final[
+    df_bess_final["Anio"]
     == anio_seleccionado
 ].copy()
 
-consolidado_anual = consolidado_anual.merge(
-    budgets_anio[
+if not bess_anio.empty:
+    meses_bess = sorted(
+        bess_anio["Mes"]
+        .astype(int)
+        .unique()
+        .tolist(),
+        reverse=True
+    )
+
+    mes_bess = st.selectbox(
+        "Mes para indicadores BESS",
+        options=meses_bess,
+        format_func=lambda mes: (
+            MESES_COMPLETOS[mes]
+        )
+    )
+
+    fila_bess = (
+        bess_anio[
+            bess_anio["Mes"] == mes_bess
+        ]
+        .iloc[0]
+    )
+
+    col_b1, col_b2, col_b3, col_b4 = (
+        st.columns(4)
+    )
+
+    col_b1.metric(
+        "Inyección total del mes",
+        f"{fila_bess['Energia_Total_MWh']:,.1f} MWh"
+    )
+
+    col_b2.metric(
+        "Energía PPA del mes",
+        f"{fila_bess['Energia_PPA_MWh']:,.1f} MWh"
+    )
+
+    col_b3.metric(
+        "Energía Spot del mes",
+        f"{fila_bess['Energia_Spot_MWh']:,.1f} MWh"
+    )
+
+    col_b4.metric(
+        "Ingreso del mes",
+        f"USD {fila_bess['Ingreso_Total_USD']:,.0f}"
+    )
+
+    st.caption(
+        f"Fuente del mes: {fila_bess['Fuente']}. "
+        f"Precio PPA: USD {PRECIO_PPA:,.2f}/MWh."
+    )
+
+
+# =========================================================
+# CONSOLIDADO ANUAL DEL BESS
+# =========================================================
+
+consolidado_bess = pd.DataFrame({
+    "Mes": range(1, 13)
+})
+
+consolidado_bess = (
+    consolidado_bess
+    .merge(
+        bess_anio,
+        on="Mes",
+        how="left"
+    )
+)
+
+budgets_bess_anio = df_budgets_bess[
+    df_budgets_bess["Anio"]
+    == anio_seleccionado
+]
+
+consolidado_bess = consolidado_bess.merge(
+    budgets_bess_anio[
         [
             "Mes",
             "Budget_Generacion_MWh",
@@ -1713,254 +1823,117 @@ consolidado_anual = consolidado_anual.merge(
     how="left"
 )
 
-columnas_resultados = [
+for columna in [
     "Energia_PPA_MWh",
     "Energia_Spot_MWh",
     "Energia_Total_MWh",
-    "Ingreso_PPA_USD",
-    "Ingreso_Spot_USD",
     "Ingreso_Total_USD"
-]
+]:
+    consolidado_bess[columna] = (
+        consolidado_bess[columna]
+        .fillna(0)
+    )
 
-for columna in columnas_resultados:
-    if columna not in consolidado_anual.columns:
-        consolidado_anual[columna] = 0
-
-consolidado_anual[columnas_resultados] = (
-    consolidado_anual[columnas_resultados]
-    .fillna(0)
-)
-
-consolidado_anual["Nombre_Mes"] = (
-    consolidado_anual["Mes"]
+consolidado_bess["Nombre_Mes"] = (
+    consolidado_bess["Mes"]
     .map(NOMBRES_MESES)
 )
 
-fig_anual = go.Figure()
+fig_bess = go.Figure()
 
-fig_anual.add_trace(
+fig_bess.add_trace(
     go.Bar(
-        x=consolidado_anual["Nombre_Mes"],
-        y=consolidado_anual[
-            "Energia_PPA_MWh"
-        ],
-        name="Energía PPA real",
+        x=consolidado_bess["Nombre_Mes"],
+        y=consolidado_bess["Energia_PPA_MWh"],
+        name="PPA real",
         marker_color="#149447",
-        marker_line_color="#1559A6",
-        marker_line_width=1.5,
-        width=0.58,
-        hovertemplate=(
-            "<b>%{x}</b><br>"
-            "PPA real: %{y:,.2f} MWh"
-            "<extra></extra>"
-        )
+        width=0.58
     )
 )
 
-fig_anual.add_trace(
+fig_bess.add_trace(
     go.Bar(
-        x=consolidado_anual["Nombre_Mes"],
-        y=consolidado_anual[
-            "Energia_Spot_MWh"
-        ],
-        name="Energía Spot real",
+        x=consolidado_bess["Nombre_Mes"],
+        y=consolidado_bess["Energia_Spot_MWh"],
+        name="Spot real",
         marker_color="#D94141",
-        marker_line_color="#1559A6",
-        marker_line_width=1.5,
-        width=0.58,
-        hovertemplate=(
-            "<b>%{x}</b><br>"
-            "Spot real: %{y:,.2f} MWh"
-            "<extra></extra>"
-        )
+        width=0.58
     )
 )
 
-fig_anual.add_trace(
+fig_bess.add_trace(
     go.Scatter(
-        x=consolidado_anual["Nombre_Mes"],
-        y=consolidado_anual[
+        x=consolidado_bess["Nombre_Mes"],
+        y=consolidado_bess[
             "Budget_Generacion_MWh"
         ],
-        name="Budget de generación",
+        name="Budget generación",
         mode="lines+markers",
         line=dict(
             color="#FF3333",
             width=3
-        ),
-        marker=dict(
-            color="#FF3333",
-            size=8
-        ),
-        hovertemplate=(
-            "<b>%{x}</b><br>"
-            "Budget generación: "
-            "%{y:,.2f} MWh"
-            "<extra></extra>"
         )
     )
 )
 
-fig_anual.add_trace(
+fig_bess.add_trace(
     go.Scatter(
-        x=consolidado_anual["Nombre_Mes"],
-        y=consolidado_anual[
+        x=consolidado_bess["Nombre_Mes"],
+        y=consolidado_bess[
             "Budget_PPA_MWh"
         ],
-        name="Budget contrato PPA",
+        name="Budget PPA",
         mode="lines+markers",
         line=dict(
             color="#111111",
             width=3
-        ),
-        marker=dict(
-            color="#111111",
-            size=8
-        ),
-        hovertemplate=(
-            "<b>%{x}</b><br>"
-            "Budget PPA: %{y:,.2f} MWh"
-            "<extra></extra>"
         )
     )
 )
 
-fig_anual.update_layout(
+fig_bess.update_layout(
+    title="Consolidado anual BESS",
     barmode="stack",
     xaxis_title="Mes",
     yaxis_title="Energía [MWh]",
-    legend_title="Serie",
     hovermode="x unified",
-    height=600,
-    bargap=0.35,
-    margin=dict(
-        l=30,
-        r=30,
-        t=30,
-        b=30
-    )
-)
-
-fig_anual.update_xaxes(
-    categoryorder="array",
-    categoryarray=[
-        "Ene",
-        "Feb",
-        "Mar",
-        "Abr",
-        "May",
-        "Jun",
-        "Jul",
-        "Ago",
-        "Sep",
-        "Oct",
-        "Nov",
-        "Dic"
-    ],
-    showgrid=False
-)
-
-fig_anual.update_yaxes(
-    rangemode="tozero",
-    gridcolor=(
-        "rgba(140, 140, 140, 0.25)"
-    )
+    height=580
 )
 
 st.plotly_chart(
-    fig_anual,
+    fig_bess,
     use_container_width=True
 )
 
 
 # =========================================================
-# CUMPLIMIENTO ACUMULADO
+# INGRESOS ACUMULADOS BESS
 # =========================================================
 
-meses_con_resultados = (
-    consolidado_anual[
-        "Energia_Total_MWh"
-    ] > 0
-)
-
-budget_generacion_acumulado = (
-    consolidado_anual.loc[
-        meses_con_resultados,
-        "Budget_Generacion_MWh"
-    ]
-    .fillna(0)
+ingreso_bess_acumulado = (
+    bess_anio["Ingreso_Total_USD"]
     .sum()
 )
 
-budget_ppa_acumulado = (
-    consolidado_anual.loc[
-        meses_con_resultados,
-        "Budget_PPA_MWh"
-    ]
-    .fillna(0)
+energia_bess_acumulada = (
+    bess_anio["Energia_Total_MWh"]
     .sum()
 )
-
-cumplimiento_generacion = (
-    energia_total_anual
-    / budget_generacion_acumulado
-    * 100
-    if budget_generacion_acumulado > 0
-    else 0
-)
-
-cumplimiento_ppa = (
-    energia_ppa_anual
-    / budget_ppa_acumulado
-    * 100
-    if budget_ppa_acumulado > 0
-    else 0
-)
-
-col_budget_1, col_budget_2 = st.columns(2)
-
-col_budget_1.metric(
-    "Cumplimiento acumulado generación",
-    f"{cumplimiento_generacion:,.1f} %"
-)
-
-col_budget_2.metric(
-    "Cumplimiento acumulado PPA",
-    f"{cumplimiento_ppa:,.1f} %"
-)
-
-
-# =========================================================
-# FUENTE UTILIZADA
-# =========================================================
 
 with st.expander(
-    "Fuente utilizada por mes",
+    "Ver acumulados del BESS",
     expanded=False
 ):
-    tabla_fuentes = resumen_anio[
-        [
-            "Anio",
-            "Mes",
-            "Fuente"
-        ]
-    ].copy()
+    col_a1, col_a2 = st.columns(2)
 
-    tabla_fuentes["Mes"] = (
-        tabla_fuentes["Mes"]
-        .map(MESES_COMPLETOS)
+    col_a1.metric(
+        "Inyección acumulada BESS",
+        f"{energia_bess_acumulada:,.1f} MWh"
     )
 
-    tabla_fuentes = tabla_fuentes.rename(
-        columns={
-            "Anio": "Año"
-        }
-    )
-
-    st.dataframe(
-        tabla_fuentes,
-        use_container_width=True,
-        hide_index=True
+    col_a2.metric(
+        "Ingreso acumulado BESS",
+        f"USD {ingreso_bess_acumulado:,.0f}"
     )
 
 
@@ -1968,18 +1941,12 @@ with st.expander(
 # INFORMACION FINAL
 # =========================================================
 
-if not df_api.empty:
-    st.caption(
-        "Última medición disponible desde la API: "
-        f"{df_api['Fecha'].max():%d-%m-%Y %H:%M}"
-    )
-
 st.caption(
     "Dashboard procesado: "
     f"{datetime.now():%d-%m-%Y %H:%M:%S}"
 )
 
 st.caption(
-    "Las consultas API y la caché se actualizan "
+    "Las consultas a las API y la caché se renuevan "
     "cada 12 horas."
 )
