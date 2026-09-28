@@ -452,7 +452,30 @@ else:
     fig_d = go.Figure()
     fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_PPA_MWh"], name="PPA real", marker_color="#1565C0", width=ancho)
     fig_d.add_bar(x=diario_mes["Fecha_Dia"], y=diario_mes["Energia_Spot_MWh"], name="Spot real", marker_color="#65BDEB", width=ancho)
-    fig_d.update_layout(title=f"Inyección diaria BESS, {MESES_COMPLETOS[md]} {ad}", barmode="stack", xaxis_title="Día", yaxis_title="Energía [MWh]", hovermode="x unified", height=500, legend=dict(orientation="h", y=1.02))
+    fig_d.update_layout(
+    title=(
+    f"Inyección diaria BESS, "
+    f"{MESES_COMPLETOS[md]} {ad}"
+    ),
+    barmode="stack",
+    xaxis_title="Día",
+    yaxis_title="Energía [MWh]",
+    hovermode="x unified",
+    height=550,
+    legend=dict(
+    orientation="h",
+    yanchor="top",
+    y=-0.22,
+    xanchor="center",
+    x=0.5
+    ),
+    margin=dict(
+    l=60,
+    r=30,
+    t=70,
+    b=110
+    )
+    )
     fig_d.update_xaxes(dtick=24*60*60*1000, tickformat="%d", range=[primer-pd.Timedelta(hours=12),ultimo+pd.Timedelta(hours=12)], showgrid=False)
     fig_d.update_yaxes(
     range=[0, 120],
@@ -492,7 +515,7 @@ fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_PPA_MWh"],name="PPA real",m
 fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_Spot_MWh"],name="Spot real",marker_color="#65BDEB",width=0.58)
 fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_Generacion_MWh"],name="Budget generación",mode="lines+markers",line=dict(color="#0B3D91",width=3))
 fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_PPA_MWh"],name="Budget PPA",mode="lines+markers",line=dict(color="#2EAD5B",width=3))
-fig_b.update_layout(title="Consolidado anual BESS",barmode="stack",xaxis_title="Mes",yaxis_title="Energía [MWh]",hovermode="x unified",height=560,legend=dict(orientation="h",yanchor="top",y=-0.22),xanchor="center",x=0.5)
+fig_b.update_layout(title="Consolidado anual BESS",barmode="stack",xaxis_title="Mes",yaxis_title="Energía [MWh]",hovermode="x unified",height=560,legend=dict(orientation="h",y=1.02))
 st.plotly_chart(fig_b,use_container_width=True)
 
 with st.expander("Ver acumulados del BESS"):
