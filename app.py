@@ -537,6 +537,49 @@ fig_b.update_layout(
         b=120
     )
 )
+fig_b.update_layout(
+    title="Consolidado anual BESS",
+    barmode="stack",
+    xaxis_title="Mes",
+    yaxis_title="Energía [MWh]",
+    hovermode="x unified",
+    height=630,
+    legend=dict(
+        orientation="h",
+        yanchor="top",
+        y=-0.18,
+        xanchor="center",
+        x=0.5,
+        traceorder="normal"
+    ),
+    margin=dict(
+        l=70,
+        r=35,
+        t=75,
+        b=120
+    )
+)
+
+fig_b.update_xaxes(
+    showgrid=False
+)
+
+fig_b.update_yaxes(
+    rangemode="tozero",
+    tickmode="linear",
+    dtick=500,
+    showgrid=True,
+    gridcolor="rgba(128, 128, 128, 0.22)",
+    gridwidth=1,
+    zeroline=True,
+    zerolinecolor="rgba(80, 80, 80, 0.50)",
+    zerolinewidth=1
+)
+
+st.plotly_chart(
+    fig_b,
+    use_container_width=True
+)
 st.plotly_chart(fig_b,use_container_width=True)
 
 with st.expander("Ver acumulados del BESS"):
