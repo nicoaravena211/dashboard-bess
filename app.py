@@ -515,7 +515,28 @@ fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_PPA_MWh"],name="PPA real",m
 fig_b.add_bar(x=con_b["Nombre_Mes"],y=con_b["Energia_Spot_MWh"],name="Spot real",marker_color="#65BDEB",width=0.58)
 fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_Generacion_MWh"],name="Budget generación",mode="lines+markers",line=dict(color="#0B3D91",width=3))
 fig_b.add_scatter(x=con_b["Nombre_Mes"],y=con_b["Budget_PPA_MWh"],name="Budget PPA",mode="lines+markers",line=dict(color="#2EAD5B",width=3))
-fig_b.update_layout(title="Consolidado anual BESS",barmode="stack",xaxis_title="Mes",yaxis_title="Energía [MWh]",hovermode="x unified",height=560,legend=dict(orientation="h",y=1.02))
+fig_b.update_layout(
+    title="Consolidado anual BESS",
+    barmode="stack",
+    xaxis_title="Mes",
+    yaxis_title="Energía [MWh]",
+    hovermode="x unified",
+    height=630,
+    legend=dict(
+        orientation="h",
+        yanchor="top",
+        y=-0.18,
+        xanchor="center",
+        x=0.5,
+        traceorder="normal"
+    ),
+    margin=dict(
+        l=70,
+        r=35,
+        t=75,
+        b=120
+    )
+)
 st.plotly_chart(fig_b,use_container_width=True)
 
 with st.expander("Ver acumulados del BESS"):
