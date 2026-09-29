@@ -255,7 +255,7 @@ def obtener_datos_prmte(periodo, mpid, canal):
         except (requests.RequestException, ValueError):
             pass
         if intento < 2:
-            time.sleep(2)
+            time.sleep(8)
     return None
 
 
