@@ -746,95 +746,381 @@ st.caption(
     "Cada proyecto muestra su último mes disponible desde la API."
 )
 
+# =========================================================
+# ESTADO DEL CARRUSEL
+# =========================================================
+
 if "carrusel_indice" not in st.session_state:
     st.session_state.carrusel_indice = 0
+
 if "carrusel_pausado" not in st.session_state:
     st.session_state.carrusel_pausado = False
+
 if "carrusel_inicializado" not in st.session_state:
     st.session_state.carrusel_inicializado = False
 
+if "carrusel_accion_manual" not in st.session_state:
+    st.session_state.carrusel_accion_manual = False
+
+
 proyectos_carrusel_disponibles = [
-    p for p in ORDEN_CARRUSEL
-    if p in set(df_diarios_carrusel["Proyecto"].unique())
+    proyecto
+    for proyecto in ORDEN_CARRUSEL
+    if proyecto
+    in set(
+        df_diarios_carrusel["Proyecto"].unique()
+    )
 ]
 
-@st.fragment(run_every=SEGUNDOS_ROTACION_GRAFICOS)
-def mostrar_carrusel_diario():
-    if not proyectos_carrusel_disponibles:
-        st.info("No hay datos diarios disponibles para mostrar en el carrusel.")
+
+# =========================================================
+# FUNCIONES DE CONTROL
+# =========================================================
+
+def carrusel_anterior():
+    cantidad = len(
+        proyectos_carrusel_disponibles
+    )
+
+    if cantidad == 0:
         return
 
-    st.session_state.carrusel_indice %= len(proyectos_carrusel_disponibles)
-    indice_inicial = st.session_state.carrusel_indice
-    manual = False
+    st.session_state.carrusel_indice = (
+        st.session_state.carrusel_indice - 1
+    ) % cantidad
 
-    col_prev, col_pause, col_next, col_select = st.columns([1, 1, 1, 3])
-    with col_prev:
-        if st.button("◀ Anterior", use_container_width=True, key="carrusel_anterior"):
-            st.session_state.carrusel_indice = (st.session_state.carrusel_indice - 1) % len(proyectos_carrusel_disponibles)
-            manual = True
-    with col_pause:
-        texto_boton = "▶ Reanudar" if st.session_state.carrusel_pausado else "⏸ Pausar"
-        if st.button(texto_boton, use_container_width=True, key="carrusel_pausa"):
-            st.session_state.carrusel_pausado = not st.session_state.carrusel_pausado
-            manual = True
-    with col_next:
-        if st.button("Siguiente ▶", use_container_width=True, key="carrusel_siguiente"):
-            st.session_state.carrusel_indice = (st.session_state.carrusel_indice + 1) % len(proyectos_carrusel_disponibles)
-            manual = True
-    with col_select:
-        seleccionado = st.selectbox(
-            "Ir al proyecto",
-            proyectos_carrusel_disponibles,
-            index=st.session_state.carrusel_indice,
-            key="selector_carrusel",
+    st.session_state.carrusel_accion_manual = True
+
+
+def carrusel_siguiente():
+    cantidad = len(
+        proyectos_carrusel_disponibles
+    )
+
+    if cantidad == 0:
+        return
+
+    st.session_state.carrusel_indice = (
+        st.session_state.carrusel_indice + 1
+    ) % cantidad
+
+    st.session_state.carrusel_accion_manual = True
+
+
+def carrusel_pausar_reanudar():
+    st.session_state.carrusel_pausado = (
+        not st.session_state.carrusel_pausado
+    )
+
+    st.session_state.carrusel_accion_manual = True
+
+
+def carrusel_seleccionar():
+    proyecto_seleccionado = (
+        st.session_state.selector_carrusel
+    )
+
+    if (
+        proyecto_seleccionado
+        in proyectos_carrusel_disponibles
+    ):
+        st.session_state.carrusel_indice = (
+            proyectos_carrusel_disponibles.index(
+                proyecto_seleccionado
+            )
         )
-        nuevo_indice = proyectos_carrusel_disponibles.index(seleccionado)
-        if nuevo_indice != indice_inicial:
-            st.session_state.carrusel_indice = nuevo_indice
-            manual = True
+
+    st.session_state.carrusel_accion_manual = True
+
+
+# =========================================================
+# CARRUSEL
+# =========================================================
+
+@st.fragment(
+    run_every=SEGUNDOS_ROTACION_GRAFICOS
+)
+def mostrar_carrusel_diario():
+
+    if not proyectos_carrusel_disponibles:
+        st.info(
+            "No hay datos diarios disponibles "
+            "para mostrar en el carrusel."
+        )
+        return
+
+    cantidad_proyectos = len(
+        proyectos_carrusel_disponibles
+    )
+
+    st.session_state.carrusel_indice %= (
+        cantidad_proyectos
+    )
+
+    # -----------------------------------------------------
+    # ROTACION AUTOMATICA
+    # -----------------------------------------------------
 
     if not st.session_state.carrusel_inicializado:
         st.session_state.carrusel_inicializado = True
-    elif not st.session_state.carrusel_pausado and not manual:
-        st.session_state.carrusel_indice = (st.session_state.carrusel_indice + 1) % len(proyectos_carrusel_disponibles)
 
-    proyecto = proyectos_carrusel_disponibles[st.session_state.carrusel_indice]
-    datos = df_diarios_carrusel[df_diarios_carrusel["Proyecto"] == proyecto].copy().sort_values("Fecha_Dia")
-    anio = int(datos["Anio"].iloc[0])
-    mes = int(datos["Mes"].iloc[0])
-    primer = pd.Timestamp(anio, mes, 1)
-    ultimo = pd.Timestamp(anio, mes, calendar.monthrange(anio, mes)[1])
-    if anio == pd.Timestamp.now().year and mes == pd.Timestamp.now().month:
-        ultimo = min(ultimo, pd.Timestamp.now().normalize())
-    datos = pd.DataFrame({"Fecha_Dia": pd.date_range(primer, ultimo, freq="D")}).merge(
-        datos[["Fecha_Dia", "Energia_MWh"]], on="Fecha_Dia", how="left"
+    elif st.session_state.carrusel_accion_manual:
+        # Impide avanzar inmediatamente después
+        # de una acción manual.
+        st.session_state.carrusel_accion_manual = False
+
+    elif not st.session_state.carrusel_pausado:
+        st.session_state.carrusel_indice = (
+            st.session_state.carrusel_indice + 1
+        ) % cantidad_proyectos
+
+    proyecto_actual = (
+        proyectos_carrusel_disponibles[
+            st.session_state.carrusel_indice
+        ]
     )
 
-    fig_c = go.Figure()
-    fig_c.add_bar(
+    # Sincroniza el selector antes de crearlo.
+    st.session_state.selector_carrusel = (
+        proyecto_actual
+    )
+
+    # -----------------------------------------------------
+    # CONTROLES
+    # -----------------------------------------------------
+
+    col_anterior, col_pausa, col_siguiente, col_selector = (
+        st.columns(
+            [1, 1, 1, 3]
+        )
+    )
+
+    with col_anterior:
+        st.button(
+            "◀ Anterior",
+            use_container_width=True,
+            key="boton_carrusel_anterior",
+            on_click=carrusel_anterior
+        )
+
+    with col_pausa:
+        texto_boton = (
+            "▶ Reanudar"
+            if st.session_state.carrusel_pausado
+            else "⏸ Pausar"
+        )
+
+        st.button(
+            texto_boton,
+            use_container_width=True,
+            key="boton_carrusel_pausa",
+            on_click=carrusel_pausar_reanudar
+        )
+
+    with col_siguiente:
+        st.button(
+            "Siguiente ▶",
+            use_container_width=True,
+            key="boton_carrusel_siguiente",
+            on_click=carrusel_siguiente
+        )
+
+    with col_selector:
+        st.selectbox(
+            "Ir al proyecto",
+            options=proyectos_carrusel_disponibles,
+            key="selector_carrusel",
+            on_change=carrusel_seleccionar
+        )
+
+    # Recupera nuevamente el proyecto porque una
+    # acción manual puede haber cambiado el índice.
+    proyecto_actual = (
+        proyectos_carrusel_disponibles[
+            st.session_state.carrusel_indice
+        ]
+    )
+
+    # -----------------------------------------------------
+    # DATOS DEL PROYECTO
+    # -----------------------------------------------------
+
+    datos = df_diarios_carrusel[
+        df_diarios_carrusel["Proyecto"]
+        == proyecto_actual
+    ].copy()
+
+    datos = datos.sort_values(
+        "Fecha_Dia"
+    )
+
+    if datos.empty:
+        st.info(
+            f"No hay información diaria disponible "
+            f"para {proyecto_actual}."
+        )
+        return
+
+    anio = int(
+        datos["Anio"].iloc[0]
+    )
+
+    mes = int(
+        datos["Mes"].iloc[0]
+    )
+
+    primer_dia = pd.Timestamp(
+        anio,
+        mes,
+        1
+    )
+
+    ultimo_dia = pd.Timestamp(
+        anio,
+        mes,
+        calendar.monthrange(
+            anio,
+            mes
+        )[1]
+    )
+
+    hoy_normalizado = (
+        pd.Timestamp.now().normalize()
+    )
+
+    if (
+        anio == hoy_normalizado.year
+        and mes == hoy_normalizado.month
+    ):
+        ultimo_dia = min(
+            ultimo_dia,
+            hoy_normalizado
+        )
+
+    calendario = pd.DataFrame({
+        "Fecha_Dia": pd.date_range(
+            primer_dia,
+            ultimo_dia,
+            freq="D"
+        )
+    })
+
+    datos = calendario.merge(
+        datos[
+            [
+                "Fecha_Dia",
+                "Energia_MWh"
+            ]
+        ],
+        on="Fecha_Dia",
+        how="left"
+    )
+
+    # Los días futuros no se incluyen.
+    # Los días sin mediciones quedan vacíos.
+    # Si prefieres mostrarlos en cero, usa:
+    # datos["Energia_MWh"] = (
+    #     datos["Energia_MWh"].fillna(0)
+    # )
+
+    # -----------------------------------------------------
+    # GRAFICO
+    # -----------------------------------------------------
+
+    figura = go.Figure()
+
+    figura.add_bar(
         x=datos["Fecha_Dia"],
         y=datos["Energia_MWh"],
         name="Energía diaria",
         marker_color=COLOR_PRIMARIO,
-        width=0.58 * 24 * 60 * 60 * 1000,
-        hovertemplate="<b>%{x|%d-%m-%Y}</b><br>Energía: %{y:,.2f} MWh<extra></extra>",
+        width=(
+            0.58
+            * 24
+            * 60
+            * 60
+            * 1000
+        ),
+        hovertemplate=(
+            "<b>%{x|%d-%m-%Y}</b><br>"
+            "Energía: %{y:,.2f} MWh"
+            "<extra></extra>"
+        )
     )
-    estado = "Pausado" if st.session_state.carrusel_pausado else f"Rotación: {SEGUNDOS_ROTACION_GRAFICOS} s"
-    fig_c.update_layout(
-        title=f"Energía diaria · {proyecto} · {MESES_COMPLETOS[mes]} {anio}",
+
+    figura.update_layout(
+        title=(
+            f"Energía diaria · "
+            f"{proyecto_actual} · "
+            f"{MESES_COMPLETOS[mes]} {anio}"
+        ),
         xaxis_title="Día del mes",
         yaxis_title="Energía [MWh]",
-        showlegend=False,
+        showlegend=False
     )
-    fig_c.update_xaxes(dtick=24*60*60*1000, tickformat="%d")
-    fig_c.update_yaxes(rangemode="tozero")
-    aplicar_estilo_grafico(fig_c, altura=500, mostrar_leyenda=False, margen_inferior=60)
-    st.plotly_chart(fig_c, use_container_width=True, key=f"carrusel_{proyecto}_{anio}_{mes}")
+
+    figura.update_xaxes(
+        dtick=24 * 60 * 60 * 1000,
+        tickformat="%d",
+        range=[
+            primer_dia
+            - pd.Timedelta(hours=12),
+            ultimo_dia
+            + pd.Timedelta(hours=12)
+        ]
+    )
+
+    figura.update_yaxes(
+        rangemode="tozero"
+    )
+
+    aplicar_estilo_grafico(
+        figura,
+        altura=500,
+        mostrar_leyenda=False,
+        margen_inferior=60
+    )
+
+    clave_proyecto = (
+        quitar_tildes(
+            proyecto_actual
+        )
+        .lower()
+        .replace(" ", "_")
+    )
+
+    st.plotly_chart(
+        figura,
+        use_container_width=True,
+        key=(
+            f"carrusel_"
+            f"{clave_proyecto}_"
+            f"{anio}_"
+            f"{mes}"
+        )
+    )
+
+    # -----------------------------------------------------
+    # ESTADO
+    # -----------------------------------------------------
+
+    estado = (
+        "Pausado"
+        if st.session_state.carrusel_pausado
+        else (
+            f"Rotación automática cada "
+            f"{SEGUNDOS_ROTACION_GRAFICOS} segundos"
+        )
+    )
+
     st.caption(
-        f"Vista {st.session_state.carrusel_indice + 1} de {len(proyectos_carrusel_disponibles)} · "
-        f"{estado} · Fuente: API"
+        f"Vista "
+        f"{st.session_state.carrusel_indice + 1} "
+        f"de {cantidad_proyectos}"
+        f" · {estado}"
+        f" · Fuente: API"
     )
+
 
 mostrar_carrusel_diario()
 
