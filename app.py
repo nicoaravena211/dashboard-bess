@@ -556,6 +556,16 @@ def generar_excel_prmte_horario(fecha_inicio, fecha_fin):
         fecha_inicio,
         fecha_fin,
     )
+
+    # Corrección exclusiva para la carga horaria del BESS:
+    # si el total de la hora es menor a 350 kWh, corresponde al offset
+    # y se reemplaza por cero antes de generar el Excel y el resumen.
+    carga_h.loc[
+        carga_h["Carga BESS kWh"].notna()
+        & (carga_h["Carga BESS kWh"] < 350),
+        "Carga BESS kWh",
+    ] = 0
+
     bess_h = bess_h.merge(carga_h, on="Fecha", how="outer")
     hojas["BESS MARIA ELENA"] = bess_h
     resumen.append({
