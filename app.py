@@ -562,7 +562,7 @@ def generar_excel_prmte_horario(fecha_inicio, fecha_fin):
     # y se reemplaza por cero antes de generar el Excel y el resumen.
     carga_h.loc[
         carga_h["Carga BESS kWh"].notna()
-        & (carga_h["Carga BESS kWh"] < 350),
+        & (carga_h["Carga BESS kWh"] < 450),
         "Carga BESS kWh",
     ] = 0
 
