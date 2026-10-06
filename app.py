@@ -451,6 +451,160 @@ def generar_excel_consolidado_mes(df_bess, df_proyectos, anio, mes):
     return buffer.getvalue()
 
 # =========================================================
+# EXCEL CONSOLIDADO ANUAL
+# =========================================================
+@st.cache_data(show_spinner=False)
+def generar_excel_consolidado_anual(df_bess, df_proyectos, anio):
+    """
+    Genera un resumen anual por proyecto:
+    - una columna por mes;
+    - una columna con la suma anual;
+    - utiliza exclusivamente los valores ya cargados en el dashboard.
+    """
+    orden_anual = [
+        "MARIA ELENA BESS",
+        "MARIA ELENA PFV",
+        "SAN PEDRO III",
+        "DOÑA CARMEN",
+        "LA QUINTA",
+        "LA PERLA",
+        "LA HUERTA",
+        "CHACAICO",
+        "SANCLEMENTE",
+        "TRILALEO",
+        "COLLANCO",
+    ]
+
+    # Proyectos solares.
+    datos_proyectos = df_proyectos[df_proyectos["Anio"] == anio][
+        ["Proyecto", "Mes", "Generacion_MWh"]
+    ].copy()
+
+    # BESS total mensual, correspondiente a PPA + Spot.
+    datos_bess = df_bess[df_bess["Anio"] == anio][
+        ["Mes", "Energia_Total_MWh"]
+    ].copy()
+    datos_bess = datos_bess.rename(
+        columns={"Energia_Total_MWh": "Generacion_MWh"}
+    )
+    datos_bess["Proyecto"] = "MARIA ELENA BESS"
+
+    datos_anuales = pd.concat(
+        [
+            datos_bess[["Proyecto", "Mes", "Generacion_MWh"]],
+            datos_proyectos,
+        ],
+        ignore_index=True,
+    )
+
+    tabla = (
+        datos_anuales.pivot_table(
+            index="Proyecto",
+            columns="Mes",
+            values="Generacion_MWh",
+            aggfunc="sum",
+        )
+        .reindex(orden_anual)
+        .reindex(columns=range(1, 13))
+    )
+
+    tabla.columns = [MESES_CORTOS[mes] for mes in range(1, 13)]
+    tabla["Inyección Anual MWh"] = tabla.sum(axis=1, min_count=1)
+    tabla = tabla.reset_index().rename(columns={"Proyecto": "Parque"})
+
+    buffer = BytesIO()
+    nombre_hoja = "Consolidado Anual"
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        # Fila 1: título. Fila 2: encabezados.
+        tabla.to_excel(
+            writer,
+            sheet_name=nombre_hoja,
+            index=False,
+            startrow=1,
+        )
+
+        ws = writer.sheets[nombre_hoja]
+
+        # Título superior.
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=14)
+        titulo = ws.cell(row=1, column=1)
+        titulo.value = f"CONSOLIDADO ANUAL {anio} [MWh]"
+        titulo.fill = PatternFill("solid", fgColor="0B3D91")
+        titulo.font = Font(name="Calibri", size=13, bold=True, color="FFFFFF")
+        titulo.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[1].height = 25
+
+        # Encabezados.
+        for col in range(1, 15):
+            celda = ws.cell(row=2, column=col)
+            celda.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+            celda.fill = PatternFill("solid", fgColor="1565C0")
+            celda.alignment = Alignment(horizontal="center", vertical="center")
+            lado = Side(style="thin", color="C9D1D9")
+            celda.border = Border(left=lado, right=lado, top=lado, bottom=lado)
+        ws.row_dimensions[2].height = 22
+
+        # Cuerpo.
+        fill_alterna = PatternFill("solid", fgColor="F5F7FA")
+        fill_total = PatternFill("solid", fgColor="EBF1DE")
+        lado = Side(style="thin", color="C9D1D9")
+        borde = Border(left=lado, right=lado, top=lado, bottom=lado)
+
+        for fila in range(3, ws.max_row + 1):
+            for col in range(1, 15):
+                celda = ws.cell(row=fila, column=col)
+                celda.border = borde
+                celda.font = Font(name="Calibri", size=11, color="000000")
+                celda.alignment = Alignment(
+                    horizontal="left" if col == 1 else "right",
+                    vertical="center",
+                )
+                if fila % 2 == 0:
+                    celda.fill = fill_alterna
+                if col == 14:
+                    celda.fill = fill_total
+                    celda.font = Font(name="Calibri", size=11, bold=True, color="000000")
+                if col >= 2:
+                    celda.number_format = '#,##0.0'
+            ws.row_dimensions[fila].height = 20
+
+        # Fila de total del portafolio.
+        fila_total = ws.max_row + 1
+        ws.cell(fila_total, 1).value = "TOTAL PORTAFOLIO"
+        for col in range(2, 15):
+            letra = get_column_letter(col)
+            ws.cell(fila_total, col).value = f"=SUM({letra}3:{letra}{fila_total - 1})"
+            ws.cell(fila_total, col).number_format = '#,##0.0'
+
+        for col in range(1, 15):
+            celda = ws.cell(fila_total, col)
+            celda.fill = PatternFill("solid", fgColor="DCE6F1")
+            celda.font = Font(name="Calibri", size=11, bold=True, color="172B4D")
+            celda.border = borde
+            celda.alignment = Alignment(
+                horizontal="left" if col == 1 else "right",
+                vertical="center",
+            )
+
+        # Dimensiones y vista.
+        ws.column_dimensions["A"].width = 25
+        for col in range(2, 14):
+            ws.column_dimensions[get_column_letter(col)].width = 12
+        ws.column_dimensions["N"].width = 22
+        ws.freeze_panes = "B3"
+        ws.sheet_view.showGridLines = False
+        ws.auto_filter.ref = f"A2:N{fila_total}"
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_area = f"A1:N{fila_total}"
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+# =========================================================
 # CARGA Y UNIONES
 # =========================================================
 try:
@@ -504,7 +658,26 @@ st.sidebar.download_button(
     key="descargar_consolidado_mensual",
 )
 st.sidebar.caption(f"Hoja: Consolidado {MESES_COMPLETOS[mes_descarga]}")
-st.sidebar.caption("El archivo usa los valores ya cargados; no vuelve a consultar la API.")
+
+st.sidebar.divider()
+
+# Descargable anual adicional.
+archivo_anual = generar_excel_consolidado_anual(
+    df_bess_final,
+    df_proyectos_final,
+    anio_seleccionado,
+)
+
+st.sidebar.download_button(
+    "Descargar Consolidado Anual",
+    data=archivo_anual,
+    file_name=f"Consolidado Anual {anio_seleccionado}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+    key="descargar_consolidado_anual",
+)
+st.sidebar.caption(f"Hoja: Consolidado Anual · Año {anio_seleccionado}")
+st.sidebar.caption("Los archivos usan los valores ya cargados; no vuelven a consultar la API.")
 st.sidebar.caption("Los datos API se actualizan cuando la aplicación se reinicia.")
 
 # =========================================================
