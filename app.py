@@ -371,6 +371,253 @@ def descargar_diarios_carrusel(periodos, fecha_inicio, fecha_fin):
     return (pd.concat(resultados,ignore_index=True).sort_values(["Proyecto","Fecha_Dia"]) if resultados else pd.DataFrame(columns=cols)), sorted(set(advertencias))
 
 # =========================================================
+# DESCARGABLE PRMTE HORARIO
+# =========================================================
+def periodos_entre_fechas_diarias(fecha_inicio, fecha_fin):
+    """Devuelve los meses YYYYMM necesarios para cubrir un rango diario."""
+    inicio = pd.Timestamp(fecha_inicio).normalize()
+    fin = pd.Timestamp(fecha_fin).normalize()
+    return [p.strftime("%Y%m") for p in pd.period_range(inicio, fin, freq="M")]
+
+
+def obtener_serie_prmte_rango(configuraciones, canal, nombre_columna, fecha_inicio, fecha_fin):
+    """Descarga y suma los MPID de una instalación para un canal y rango."""
+    registros = []
+    periodos = periodos_entre_fechas_diarias(fecha_inicio, fecha_fin)
+
+    for conf in configuraciones:
+        mpid = conf["mpid"]
+        canal_consulta = conf.get("canal", canal)
+        for periodo in periodos:
+            datos, error_api = obtener_datos_prmte(
+                periodo + "012345",
+                mpid,
+                canal_consulta,
+            )
+            mediciones = extraer_mediciones(datos, canal_consulta)
+            if datos is None or not mediciones:
+                continue
+            registros.extend(mediciones)
+
+    if not registros:
+        return pd.DataFrame(columns=["Fecha", nombre_columna])
+
+    df = pd.DataFrame(registros)
+    df["Fecha"] = parse_fecha_safe(df["Fecha"])
+    df[nombre_columna] = convertir_numerico(df["Energia_kWh"]).fillna(0)
+    df = df.dropna(subset=["Fecha"])
+
+    inicio = pd.Timestamp(fecha_inicio).normalize()
+    fin_exclusivo = pd.Timestamp(fecha_fin).normalize() + pd.Timedelta(days=1)
+    df = df[(df["Fecha"] >= inicio) & (df["Fecha"] < fin_exclusivo)].copy()
+
+    if df.empty:
+        return pd.DataFrame(columns=["Fecha", nombre_columna])
+
+    return (
+        df.groupby("Fecha", as_index=False)[nombre_columna]
+        .sum()
+        .sort_values("Fecha")
+    )
+
+
+def completar_y_resamplear_horario(df, columna, fecha_inicio, fecha_fin):
+    """Completa el calendario de 15 minutos y agrega la medición a una hora."""
+    inicio = pd.Timestamp(fecha_inicio).normalize()
+    fin_hora = pd.Timestamp(fecha_fin).normalize() + pd.Timedelta(hours=23)
+    indice_horario = pd.date_range(inicio, fin_hora, freq="h")
+
+    if df.empty:
+        return pd.DataFrame({"Fecha": indice_horario, columna: pd.NA})
+
+    horario = (
+        df.set_index("Fecha")
+        .resample("h")[columna]
+        .sum(min_count=1)
+        .reindex(indice_horario)
+        .rename_axis("Fecha")
+        .reset_index()
+    )
+    return horario
+
+
+@st.cache_data(show_spinner=False)
+def generar_excel_prmte_horario(fecha_inicio, fecha_fin):
+    """
+    Genera un Excel PRMTE horario para todos los parques.
+
+    Incluye:
+    - Inyección horaria, canal 3, para todos los parques.
+    - María Elena PFV: Inyección y Neto PV Red según el neteo del ejemplo.
+    - BESS María Elena: Inyección canal 3 y Carga canal 1.
+    - Hoja Resumen con totales del rango.
+
+    La caché no tiene TTL. El mismo rango no vuelve a consultar la API mientras
+    la aplicación permanezca en ejecución.
+    """
+    fecha_inicio = pd.Timestamp(fecha_inicio).normalize()
+    fecha_fin = pd.Timestamp(fecha_fin).normalize()
+    if fecha_fin < fecha_inicio:
+        raise ValueError("La fecha final no puede ser anterior a la fecha inicial.")
+
+    configuraciones = {
+        nombre: [dict(conf) for conf in lista]
+        for nombre, lista in PROYECTOS.items()
+    }
+    configuraciones["BESS MARIA ELENA"] = [
+        {"mpid": mpid, "canal": 3}
+        for mpid in BESS_MPIDS
+    ]
+
+    # Series BESS necesarias tanto para su hoja como para el neteo de María Elena PFV.
+    bess_inyeccion_15m = obtener_serie_prmte_rango(
+        configuraciones["BESS MARIA ELENA"],
+        3,
+        "Inyección kWh",
+        fecha_inicio,
+        fecha_fin,
+    )
+    bess_carga_15m = obtener_serie_prmte_rango(
+        [{"mpid": mpid, "canal": 1} for mpid in BESS_MPIDS],
+        1,
+        "Carga BESS kWh",
+        fecha_inicio,
+        fecha_fin,
+    )
+
+    hojas = {}
+    resumen = []
+
+    # Todos los parques solares.
+    for proyecto in PROYECTOS:
+        df_15m = obtener_serie_prmte_rango(
+            configuraciones[proyecto],
+            3,
+            "Inyección kWh",
+            fecha_inicio,
+            fecha_fin,
+        )
+
+        if proyecto == "MARIA ELENA PFV":
+            base = df_15m.merge(
+                bess_inyeccion_15m.rename(columns={"Inyección kWh": "BESS Raw kWh"}),
+                on="Fecha",
+                how="left",
+            )
+            base["BESS Raw kWh"] = convertir_numerico(base["BESS Raw kWh"]).fillna(0)
+            base["Neto PV Red kWh"] = base["Inyección kWh"]
+            base.loc[base["BESS Raw kWh"] > 0, "Neto PV Red kWh"] = 0
+
+            inyeccion_h = completar_y_resamplear_horario(
+                base[["Fecha", "Inyección kWh"]],
+                "Inyección kWh",
+                fecha_inicio,
+                fecha_fin,
+            )
+            neto_h = completar_y_resamplear_horario(
+                base[["Fecha", "Neto PV Red kWh"]],
+                "Neto PV Red kWh",
+                fecha_inicio,
+                fecha_fin,
+            )
+            horario = inyeccion_h.merge(neto_h, on="Fecha", how="outer")
+            hojas[proyecto] = horario
+            resumen.append({
+                "Parque": proyecto,
+                "Inyección MWh": horario["Inyección kWh"].sum(min_count=1) / 1000,
+                "Neto PV Red MWh": horario["Neto PV Red kWh"].sum(min_count=1) / 1000,
+                "Carga MWh": pd.NA,
+            })
+        else:
+            horario = completar_y_resamplear_horario(
+                df_15m,
+                "Inyección kWh",
+                fecha_inicio,
+                fecha_fin,
+            )
+            hojas[proyecto] = horario
+            resumen.append({
+                "Parque": proyecto,
+                "Inyección MWh": horario["Inyección kWh"].sum(min_count=1) / 1000,
+                "Neto PV Red MWh": pd.NA,
+                "Carga MWh": pd.NA,
+            })
+
+    # BESS: inyección y carga horaria.
+    bess_h = completar_y_resamplear_horario(
+        bess_inyeccion_15m,
+        "Inyección kWh",
+        fecha_inicio,
+        fecha_fin,
+    )
+    carga_h = completar_y_resamplear_horario(
+        bess_carga_15m,
+        "Carga BESS kWh",
+        fecha_inicio,
+        fecha_fin,
+    )
+    bess_h = bess_h.merge(carga_h, on="Fecha", how="outer")
+    hojas["BESS MARIA ELENA"] = bess_h
+    resumen.append({
+        "Parque": "BESS MARIA ELENA",
+        "Inyección MWh": bess_h["Inyección kWh"].sum(min_count=1) / 1000,
+        "Neto PV Red MWh": pd.NA,
+        "Carga MWh": bess_h["Carga BESS kWh"].sum(min_count=1) / 1000,
+    })
+
+    df_resumen = pd.DataFrame(resumen)
+    df_resumen.insert(0, "Fecha inicio", fecha_inicio.strftime("%Y-%m-%d"))
+    df_resumen.insert(1, "Fecha fin", fecha_fin.strftime("%Y-%m-%d"))
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_resumen.to_excel(writer, sheet_name="Resumen", index=False)
+
+        nombres_usados = {"Resumen"}
+        for proyecto in ORDEN_CARRUSEL[1:] + ["BESS MARIA ELENA"]:
+            if proyecto not in hojas:
+                continue
+            nombre_hoja = proyecto[:31]
+            if nombre_hoja in nombres_usados:
+                nombre_hoja = (nombre_hoja[:27] + "_PRMTE")[:31]
+            nombres_usados.add(nombre_hoja)
+            hojas[proyecto].to_excel(writer, sheet_name=nombre_hoja, index=False)
+
+        # Formato general de cada hoja.
+        for nombre_hoja, ws in writer.sheets.items():
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            ws.sheet_view.showGridLines = False
+
+            for celda in ws[1]:
+                celda.fill = PatternFill("solid", fgColor="1565C0")
+                celda.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+                celda.alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[1].height = 22
+
+            lado = Side(style="thin", color="DFE1E6")
+            borde = Border(left=lado, right=lado, top=lado, bottom=lado)
+            for fila in ws.iter_rows(min_row=2):
+                for celda in fila:
+                    celda.border = borde
+                    celda.font = Font(name="Calibri", size=10, color="000000")
+                    if celda.column == 1 and nombre_hoja != "Resumen":
+                        celda.number_format = "yyyy-mm-dd hh:mm"
+                    elif isinstance(celda.value, (int, float)):
+                        celda.number_format = '#,##0.000'
+
+            for columna in ws.columns:
+                largo = max(len(str(c.value)) if c.value is not None else 0 for c in columna)
+                ws.column_dimensions[columna[0].column_letter].width = min(max(largo + 2, 12), 28)
+
+            ws.page_setup.orientation = "landscape"
+            ws.page_setup.fitToWidth = 1
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+# =========================================================
 # NUEVO EXCEL MENSUAL SEGUN FORMATO SOLICITADO
 # =========================================================
 @st.cache_data(show_spinner=False)
@@ -677,8 +924,72 @@ st.sidebar.download_button(
     key="descargar_consolidado_anual",
 )
 st.sidebar.caption(f"Hoja: Consolidado Anual · Año {anio_seleccionado}")
-st.sidebar.caption("Los archivos usan los valores ya cargados; no vuelven a consultar la API.")
-st.sidebar.caption("Los datos API se actualizan cuando la aplicación se reinicia.")
+
+st.sidebar.divider()
+st.sidebar.subheader("Descarga PRMTE horario")
+
+fecha_minima_prmte = pd.Timestamp(f"{ANIO_OPERACIONAL}-01-01").date()
+fecha_maxima_prmte = pd.Timestamp.now().normalize().date()
+fecha_inicio_prmte = st.sidebar.date_input(
+    "Fecha inicial PRMTE",
+    value=pd.Timestamp.now().normalize().replace(day=1).date(),
+    min_value=fecha_minima_prmte,
+    max_value=fecha_maxima_prmte,
+    key="fecha_inicio_prmte",
+)
+fecha_fin_prmte = st.sidebar.date_input(
+    "Fecha final PRMTE",
+    value=fecha_maxima_prmte,
+    min_value=fecha_minima_prmte,
+    max_value=fecha_maxima_prmte,
+    key="fecha_fin_prmte",
+)
+
+if "archivo_prmte_horario" not in st.session_state:
+    st.session_state.archivo_prmte_horario = None
+if "nombre_archivo_prmte" not in st.session_state:
+    st.session_state.nombre_archivo_prmte = None
+if "rango_archivo_prmte" not in st.session_state:
+    st.session_state.rango_archivo_prmte = None
+
+if st.sidebar.button(
+    "Preparar archivo PRMTE",
+    use_container_width=True,
+    key="preparar_archivo_prmte",
+):
+    if fecha_fin_prmte < fecha_inicio_prmte:
+        st.sidebar.error("La fecha final debe ser igual o posterior a la fecha inicial.")
+    else:
+        with st.spinner("Descargando y consolidando PRMTE horario..."):
+            st.session_state.archivo_prmte_horario = generar_excel_prmte_horario(
+                fecha_inicio_prmte,
+                fecha_fin_prmte,
+            )
+            st.session_state.nombre_archivo_prmte = (
+                f"PRMTE_{fecha_inicio_prmte:%Y%m%d}_{fecha_fin_prmte:%Y%m%d}.xlsx"
+            )
+            st.session_state.rango_archivo_prmte = (
+                fecha_inicio_prmte,
+                fecha_fin_prmte,
+            )
+
+if st.session_state.archivo_prmte_horario is not None:
+    st.sidebar.download_button(
+        "Descargar PRMTE horario",
+        data=st.session_state.archivo_prmte_horario,
+        file_name=st.session_state.nombre_archivo_prmte,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="descargar_prmte_horario",
+    )
+    rango_prmte = st.session_state.rango_archivo_prmte
+    st.sidebar.caption(
+        f"Archivo preparado: {rango_prmte[0]:%d-%m-%Y} a {rango_prmte[1]:%d-%m-%Y}."
+    )
+
+st.sidebar.caption("Los consolidados usan los valores ya cargados; no vuelven a consultar la API.")
+st.sidebar.caption("El archivo PRMTE consulta la API solo al presionar ‘Preparar archivo PRMTE’ para un rango nuevo.")
+st.sidebar.caption("Los demás datos API se actualizan cuando la aplicación se reinicia.")
 
 # =========================================================
 # ENCABEZADO Y ADVERTENCIAS
