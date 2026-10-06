@@ -34,16 +34,21 @@ COLOR_TEXTO_SECUNDARIO = "#5E6C84"
 COLOR_BORDE = "#DFE1E6"
 COLOR_REJILLA = "rgba(94,108,132,0.18)"
 
+# El Excel puede releerse cada 12 horas.
 CACHE_EXCEL_SEGUNDOS = 12 * 60 * 60
-CACHE_API_SEGUNDOS = 15 * 60
+
+# Las API no tienen TTL. Se vuelven a consultar al reiniciar la instancia,
+# hacer Reboot o desplegar una nueva versión del código.
+CACHE_API_SEGUNDOS = None
+
+# Se conserva el refresco visual, pero no invalida las cachés API.
 REFRESCO_MS = 12 * 60 * 60 * 1000
-
-# Modifica este valor para cambiar la velocidad del carrusel.
-SEGUNDOS_ROTACION_GRAFICOS = 10
-# Si el mes actual no tiene datos, busca hasta 2 meses anteriores.
-MESES_BUSQUEDA_CARRUSEL = 3
-
 st_autorefresh(interval=REFRESCO_MS, key="actualizacion_dashboard_12h")
+
+# Carrusel.
+SEGUNDOS_ROTACION_GRAFICOS = 10
+DIAS_CARRUSEL = 30
+INCLUIR_DIA_ACTUAL_CARRUSEL = True
 
 st.markdown(
     """
@@ -69,6 +74,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# =========================================================
+# CREDENCIALES
+# =========================================================
 try:
     API_KEY_PRMTE = st.secrets["API_KEY_PRMTE"]
     API_KEY_CMG = st.secrets["API_KEY_CMG"]
@@ -133,9 +141,7 @@ ORDEN_GRAFICOS = [
     "MARIA ELENA PFV", "SAN PEDRO III", "DOÑA CARMEN", "CONSOLIDADO PMGDS",
     "LA QUINTA", "LA PERLA", "LA HUERTA", "CHACAICO", "SANCLEMENTE", "TRILALEO", "COLLANCO",
 ]
-
 ORDEN_CARRUSEL = ["MARIA ELENA BESS"] + list(PROYECTOS.keys())
-
 ORDEN_REPORTE_GENERACION = [
     "MARIA ELENA BESS", "MARIA ELENA PFV", "SAN PEDRO III", "DOÑA CARMEN",
     "LA QUINTA", "LA PERLA", "LA HUERTA", "CHACAICO", "SANCLEMENTE", "TRILALEO", "COLLANCO",
@@ -224,9 +230,15 @@ def generar_periodos(fecha_inicio, fecha_fin):
     return periodos
 
 
-def periodos_busqueda_desde(fecha_fin, cantidad):
-    actual = pd.Timestamp(fecha_fin + "-01")
-    return [(actual - pd.DateOffset(months=i)).strftime("%Y%m") for i in range(cantidad)]
+def obtener_rango_fechas_carrusel(cantidad_dias, incluir_dia_actual=True):
+    hoy_normalizado = pd.Timestamp.now().normalize()
+    fecha_fin = hoy_normalizado if incluir_dia_actual else hoy_normalizado - pd.Timedelta(days=1)
+    fecha_inicio = fecha_fin - pd.Timedelta(days=cantidad_dias - 1)
+    return fecha_inicio, fecha_fin
+
+
+def obtener_periodos_entre_fechas(fecha_inicio, fecha_fin):
+    return [p.strftime("%Y%m") for p in pd.period_range(fecha_inicio, fecha_fin, freq="M")]
 
 
 def periodo_a_texto(periodo):
@@ -234,7 +246,18 @@ def periodo_a_texto(periodo):
 
 
 PERIODOS_DISPONIBLES = generar_periodos(FECHA_INICIO, FECHA_FIN)
-PERIODOS_CARRUSEL = periodos_busqueda_desde(FECHA_FIN, MESES_BUSQUEDA_CARRUSEL)
+FECHA_INICIO_CARRUSEL, FECHA_FIN_CARRUSEL = obtener_rango_fechas_carrusel(
+    DIAS_CARRUSEL,
+    INCLUIR_DIA_ACTUAL_CARRUSEL,
+)
+PERIODOS_CARRUSEL = obtener_periodos_entre_fechas(FECHA_INICIO_CARRUSEL, FECHA_FIN_CARRUSEL)
+
+@st.cache_resource
+def obtener_hora_inicio_aplicacion():
+    return datetime.now()
+
+
+HORA_INICIO_APLICACION = obtener_hora_inicio_aplicacion()
 
 # =========================================================
 # EXCEL: LECTURA
@@ -332,7 +355,7 @@ def obtener_datos_prmte(periodo, mpid, canal):
             r = requests.get(URL_PRMTE, params=params, timeout=60)
             if r.status_code == 200:
                 data = r.json()
-                if isinstance(data, list) and len(data) > 0:
+                if isinstance(data, list) and data:
                     return data, None
                 ultimo_error = "respuesta sin registros"
             elif r.status_code == 429:
@@ -410,14 +433,14 @@ def descargar_cmg_mes(periodo):
     return df[["Fecha", "CMG_USD_MWh"]].dropna(subset=["Fecha"]).groupby("Fecha", as_index=False).agg(CMG_USD_MWh=("CMG_USD_MWh", "mean"))
 
 # =========================================================
-# DESCARGAS MENSUALES
+# DESCARGAS MENSUALES API, SIN TTL
 # =========================================================
 def obtener_pendientes_proyectos(df_consolidado):
     existentes = {(str(f.Proyecto), f"{int(f.Anio):04d}{int(f.Mes):02d}") for f in df_consolidado.itertuples()}
     return {p: [per for per in PERIODOS_DISPONIBLES if (p, per) not in existentes] for p in PROYECTOS}
 
 
-@st.cache_data(ttl=CACHE_API_SEGUNDOS, show_spinner=False)
+@st.cache_data(show_spinner=False)
 def descargar_proyectos_pendientes(pendientes):
     resultados, advertencias = [], []
     for proyecto, periodos in pendientes.items():
@@ -447,7 +470,7 @@ def descargar_proyectos_pendientes(pendientes):
     return pd.DataFrame(resultados, columns=["Anio","Mes","Proyecto","Generacion_MWh","Fuente"]), sorted(set(advertencias))
 
 
-@st.cache_data(ttl=CACHE_API_SEGUNDOS, show_spinner=False)
+@st.cache_data(show_spinner=False)
 def procesar_bess_api(periodos):
     mensuales, diarios, advertencias = [], [], []
     for periodo in periodos:
@@ -513,7 +536,7 @@ def procesar_bess_api(periodos):
     return df_m, df_d, sorted(set(advertencias))
 
 # =========================================================
-# DATOS DIARIOS PARA EL CARRUSEL
+# DATOS DIARIOS CARRUSEL: ULTIMOS 30 DIAS, SIN TTL
 # =========================================================
 def procesar_registros_diarios(registros, proyecto, periodo):
     df = pd.DataFrame(registros)
@@ -525,53 +548,75 @@ def procesar_registros_diarios(registros, proyecto, periodo):
     df["Fecha_Dia"] = df["Fecha"].dt.normalize()
     diario = df.groupby("Fecha_Dia", as_index=False).agg(Energia_MWh=("Energia_kWh", lambda s: s.abs().sum() / 1000))
     diario["Proyecto"] = proyecto
-    diario["Anio"] = int(periodo[:4])
-    diario["Mes"] = int(periodo[4:6])
+    diario["Anio"] = diario["Fecha_Dia"].dt.year
+    diario["Mes"] = diario["Fecha_Dia"].dt.month
     diario["Fuente"] = "API"
     return diario[["Fecha_Dia", "Anio", "Mes", "Proyecto", "Energia_MWh", "Fuente"]]
 
 
-@st.cache_data(ttl=CACHE_API_SEGUNDOS, show_spinner=False)
-def descargar_diarios_carrusel(periodos_busqueda):
+@st.cache_data(show_spinner=False)
+def descargar_diarios_carrusel(periodos_busqueda, fecha_inicio, fecha_fin):
     resultados, advertencias = [], []
-
     configuraciones = {"MARIA ELENA BESS": [{"mpid": mpid, "canal": 3} for mpid in BESS_MPIDS]}
     configuraciones.update(PROYECTOS)
 
     for proyecto in ORDEN_CARRUSEL:
-        encontrado = False
+        diarios_proyecto = []
         for periodo in periodos_busqueda:
-            registros_periodo = []
-            correctos = 0
+            registros_periodo, correctos = [], 0
             for conf in configuraciones[proyecto]:
                 datos, error_api = obtener_datos_prmte(periodo + "012345", conf["mpid"], conf["canal"])
                 regs = extraer_mediciones(datos, conf["canal"])
                 if datos is None or not regs:
-                    # Solo se informa el último intento si no se encontró ningún período.
-                    if periodo == periodos_busqueda[-1]:
-                        advertencias.append(f"Carrusel {proyecto}, {conf['mpid']}: {error_api or 'sin mediciones'}")
+                    advertencias.append(
+                        f"Carrusel {proyecto}, {periodo_a_texto(periodo)}, "
+                        f"{conf['mpid']}: {error_api or 'sin mediciones'}"
+                    )
                     continue
                 correctos += 1
                 registros_periodo.extend(regs)
 
-            if correctos == len(configuraciones[proyecto]) and registros_periodo:
-                diario = procesar_registros_diarios(registros_periodo, proyecto, periodo)
-                if not diario.empty:
-                    resultados.append(diario)
-                    encontrado = True
-                    break
+            if correctos != len(configuraciones[proyecto]) or not registros_periodo:
+                continue
 
-        if not encontrado:
-            advertencias.append(f"Carrusel {proyecto}: sin datos diarios en los últimos {len(periodos_busqueda)} meses")
+            diario_periodo = procesar_registros_diarios(registros_periodo, proyecto, periodo)
+            if not diario_periodo.empty:
+                diarios_proyecto.append(diario_periodo)
+
+        if not diarios_proyecto:
+            advertencias.append(
+                f"Carrusel {proyecto}: sin datos diarios entre "
+                f"{fecha_inicio:%d-%m-%Y} y {fecha_fin:%d-%m-%Y}"
+            )
+            continue
+
+        diario_proyecto = pd.concat(diarios_proyecto, ignore_index=True)
+        diario_proyecto = diario_proyecto[
+            (diario_proyecto["Fecha_Dia"] >= fecha_inicio)
+            & (diario_proyecto["Fecha_Dia"] <= fecha_fin)
+        ].copy()
+
+        if diario_proyecto.empty:
+            advertencias.append(f"Carrusel {proyecto}: sin mediciones dentro de los últimos {DIAS_CARRUSEL} días")
+            continue
+
+        diario_proyecto = diario_proyecto.groupby(
+            ["Fecha_Dia", "Anio", "Mes", "Proyecto", "Fuente"],
+            as_index=False,
+        ).agg(Energia_MWh=("Energia_MWh", "sum"))
+        resultados.append(diario_proyecto)
 
     columnas = ["Fecha_Dia", "Anio", "Mes", "Proyecto", "Energia_MWh", "Fuente"]
-    df_diarios = pd.concat(resultados, ignore_index=True) if resultados else pd.DataFrame(columns=columnas)
+    if resultados:
+        df_diarios = pd.concat(resultados, ignore_index=True).sort_values(["Proyecto", "Fecha_Dia"])
+    else:
+        df_diarios = pd.DataFrame(columns=columnas)
     return df_diarios, sorted(set(advertencias))
 
 # =========================================================
 # EXCEL DESCARGABLE
 # =========================================================
-@st.cache_data(ttl=CACHE_API_SEGUNDOS, show_spinner=False)
+@st.cache_data(show_spinner=False)
 def generar_excel_generacion_horizontal(df_bess, df_proyectos, df_budgets_bess, df_budgets_proyectos, anio):
     bess_gen = df_bess[df_bess["Anio"] == anio][["Mes", "Energia_Total_MWh"]].copy()
     bess_gen = bess_gen.rename(columns={"Energia_Total_MWh": "Generacion_MWh"})
@@ -590,8 +635,7 @@ def generar_excel_generacion_horizontal(df_bess, df_proyectos, df_budgets_bess, 
 
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        hoja = "Generacion"
-        header_gen = 2
+        hoja, header_gen = "Generacion", 2
         generacion_horizontal.to_excel(writer, sheet_name=hoja, index=False, startrow=header_gen - 1)
         fin_gen = header_gen + len(generacion_horizontal)
         titulo_budget = fin_gen + 3
@@ -687,7 +731,11 @@ df_bess_final["Prioridad"] = df_bess_final["Fuente"].map({"API":1, "Excel consol
 df_bess_final = df_bess_final.sort_values("Prioridad").drop_duplicates(["Anio","Mes"], keep="last").drop(columns="Prioridad").sort_values(["Anio","Mes"])
 
 with st.spinner("Preparando energía diaria para el carrusel..."):
-    df_diarios_carrusel, advertencias_carrusel = descargar_diarios_carrusel(PERIODOS_CARRUSEL)
+    df_diarios_carrusel, advertencias_carrusel = descargar_diarios_carrusel(
+        PERIODOS_CARRUSEL,
+        FECHA_INICIO_CARRUSEL,
+        FECHA_FIN_CARRUSEL,
+    )
 
 advertencias = sorted(set(advertencias_proyectos + advertencias_bess + advertencias_carrusel))
 
@@ -698,9 +746,6 @@ st.sidebar.header("Filtros")
 st.sidebar.caption("Configuración de visualización")
 anio_seleccionado = st.sidebar.selectbox("Año operacional", options=[ANIO_OPERACIONAL], index=0)
 st.sidebar.divider()
-if st.sidebar.button("Actualizar datos desde API", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
 
 archivo_generacion = generar_excel_generacion_horizontal(
     df_bess_final, df_proyectos_final, df_budgets_bess, df_budgets_proyectos, anio_seleccionado
@@ -714,7 +759,7 @@ st.sidebar.download_button(
     key="descargar_generacion_excel",
 )
 st.sidebar.caption("La rotación del carrusel no vuelve a consultar la API.")
-st.sidebar.caption("Actualización automática cada 12 horas. Caché API: 15 minutos.")
+st.sidebar.caption("Los datos API se actualizan cuando la aplicación se reinicia.")
 
 # =========================================================
 # ENCABEZADO
@@ -743,383 +788,120 @@ else:
 st.header("Monitoreo diario de proyectos")
 st.caption(
     f"Rotación automática cada {SEGUNDOS_ROTACION_GRAFICOS} segundos. "
-    "Cada proyecto muestra su último mes disponible desde la API."
+    f"Cada proyecto muestra los últimos {DIAS_CARRUSEL} días, desde "
+    f"{FECHA_INICIO_CARRUSEL:%d-%m-%Y} hasta {FECHA_FIN_CARRUSEL:%d-%m-%Y}."
 )
 
-# =========================================================
-# ESTADO DEL CARRUSEL
-# =========================================================
-
-if "carrusel_indice" not in st.session_state:
-    st.session_state.carrusel_indice = 0
-
-if "carrusel_pausado" not in st.session_state:
-    st.session_state.carrusel_pausado = False
-
-if "carrusel_inicializado" not in st.session_state:
-    st.session_state.carrusel_inicializado = False
-
-if "carrusel_accion_manual" not in st.session_state:
-    st.session_state.carrusel_accion_manual = False
-
+for llave, valor in {
+    "carrusel_indice": 0,
+    "carrusel_pausado": False,
+    "carrusel_inicializado": False,
+    "carrusel_accion_manual": False,
+}.items():
+    if llave not in st.session_state:
+        st.session_state[llave] = valor
 
 proyectos_carrusel_disponibles = [
-    proyecto
-    for proyecto in ORDEN_CARRUSEL
-    if proyecto
-    in set(
-        df_diarios_carrusel["Proyecto"].unique()
-    )
+    p for p in ORDEN_CARRUSEL if p in set(df_diarios_carrusel["Proyecto"].unique())
 ]
 
 
-# =========================================================
-# FUNCIONES DE CONTROL
-# =========================================================
-
 def carrusel_anterior():
-    cantidad = len(
-        proyectos_carrusel_disponibles
-    )
-
-    if cantidad == 0:
-        return
-
-    st.session_state.carrusel_indice = (
-        st.session_state.carrusel_indice - 1
-    ) % cantidad
-
-    st.session_state.carrusel_accion_manual = True
+    if proyectos_carrusel_disponibles:
+        st.session_state.carrusel_indice = (st.session_state.carrusel_indice - 1) % len(proyectos_carrusel_disponibles)
+        st.session_state.carrusel_accion_manual = True
 
 
 def carrusel_siguiente():
-    cantidad = len(
-        proyectos_carrusel_disponibles
-    )
-
-    if cantidad == 0:
-        return
-
-    st.session_state.carrusel_indice = (
-        st.session_state.carrusel_indice + 1
-    ) % cantidad
-
-    st.session_state.carrusel_accion_manual = True
+    if proyectos_carrusel_disponibles:
+        st.session_state.carrusel_indice = (st.session_state.carrusel_indice + 1) % len(proyectos_carrusel_disponibles)
+        st.session_state.carrusel_accion_manual = True
 
 
 def carrusel_pausar_reanudar():
-    st.session_state.carrusel_pausado = (
-        not st.session_state.carrusel_pausado
-    )
-
+    st.session_state.carrusel_pausado = not st.session_state.carrusel_pausado
     st.session_state.carrusel_accion_manual = True
 
 
 def carrusel_seleccionar():
-    proyecto_seleccionado = (
-        st.session_state.selector_carrusel
-    )
-
-    if (
-        proyecto_seleccionado
-        in proyectos_carrusel_disponibles
-    ):
-        st.session_state.carrusel_indice = (
-            proyectos_carrusel_disponibles.index(
-                proyecto_seleccionado
-            )
-        )
-
+    seleccionado = st.session_state.selector_carrusel
+    if seleccionado in proyectos_carrusel_disponibles:
+        st.session_state.carrusel_indice = proyectos_carrusel_disponibles.index(seleccionado)
     st.session_state.carrusel_accion_manual = True
 
 
-# =========================================================
-# CARRUSEL
-# =========================================================
-
-@st.fragment(
-    run_every=SEGUNDOS_ROTACION_GRAFICOS
-)
+@st.fragment(run_every=SEGUNDOS_ROTACION_GRAFICOS)
 def mostrar_carrusel_diario():
-
     if not proyectos_carrusel_disponibles:
-        st.info(
-            "No hay datos diarios disponibles "
-            "para mostrar en el carrusel."
-        )
+        st.info("No hay datos diarios disponibles para mostrar en el carrusel.")
         return
 
-    cantidad_proyectos = len(
-        proyectos_carrusel_disponibles
-    )
-
-    st.session_state.carrusel_indice %= (
-        cantidad_proyectos
-    )
-
-    # -----------------------------------------------------
-    # ROTACION AUTOMATICA
-    # -----------------------------------------------------
+    cantidad = len(proyectos_carrusel_disponibles)
+    st.session_state.carrusel_indice %= cantidad
 
     if not st.session_state.carrusel_inicializado:
         st.session_state.carrusel_inicializado = True
-
     elif st.session_state.carrusel_accion_manual:
-        # Impide avanzar inmediatamente después
-        # de una acción manual.
         st.session_state.carrusel_accion_manual = False
-
     elif not st.session_state.carrusel_pausado:
-        st.session_state.carrusel_indice = (
-            st.session_state.carrusel_indice + 1
-        ) % cantidad_proyectos
+        st.session_state.carrusel_indice = (st.session_state.carrusel_indice + 1) % cantidad
 
-    proyecto_actual = (
-        proyectos_carrusel_disponibles[
-            st.session_state.carrusel_indice
-        ]
-    )
+    proyecto_actual = proyectos_carrusel_disponibles[st.session_state.carrusel_indice]
+    st.session_state.selector_carrusel = proyecto_actual
 
-    # Sincroniza el selector antes de crearlo.
-    st.session_state.selector_carrusel = (
-        proyecto_actual
-    )
+    c1, c2, c3, c4 = st.columns([1,1,1,3])
+    with c1:
+        st.button("◀ Anterior", use_container_width=True, key="boton_carrusel_anterior", on_click=carrusel_anterior)
+    with c2:
+        texto = "▶ Reanudar" if st.session_state.carrusel_pausado else "⏸ Pausar"
+        st.button(texto, use_container_width=True, key="boton_carrusel_pausa", on_click=carrusel_pausar_reanudar)
+    with c3:
+        st.button("Siguiente ▶", use_container_width=True, key="boton_carrusel_siguiente", on_click=carrusel_siguiente)
+    with c4:
+        st.selectbox("Ir al proyecto", proyectos_carrusel_disponibles, key="selector_carrusel", on_change=carrusel_seleccionar)
 
-    # -----------------------------------------------------
-    # CONTROLES
-    # -----------------------------------------------------
-
-    col_anterior, col_pausa, col_siguiente, col_selector = (
-        st.columns(
-            [1, 1, 1, 3]
-        )
-    )
-
-    with col_anterior:
-        st.button(
-            "◀ Anterior",
-            use_container_width=True,
-            key="boton_carrusel_anterior",
-            on_click=carrusel_anterior
-        )
-
-    with col_pausa:
-        texto_boton = (
-            "▶ Reanudar"
-            if st.session_state.carrusel_pausado
-            else "⏸ Pausar"
-        )
-
-        st.button(
-            texto_boton,
-            use_container_width=True,
-            key="boton_carrusel_pausa",
-            on_click=carrusel_pausar_reanudar
-        )
-
-    with col_siguiente:
-        st.button(
-            "Siguiente ▶",
-            use_container_width=True,
-            key="boton_carrusel_siguiente",
-            on_click=carrusel_siguiente
-        )
-
-    with col_selector:
-        st.selectbox(
-            "Ir al proyecto",
-            options=proyectos_carrusel_disponibles,
-            key="selector_carrusel",
-            on_change=carrusel_seleccionar
-        )
-
-    # Recupera nuevamente el proyecto porque una
-    # acción manual puede haber cambiado el índice.
-    proyecto_actual = (
-        proyectos_carrusel_disponibles[
-            st.session_state.carrusel_indice
-        ]
-    )
-
-    # -----------------------------------------------------
-    # DATOS DEL PROYECTO
-    # -----------------------------------------------------
-
-    datos = df_diarios_carrusel[
-        df_diarios_carrusel["Proyecto"]
-        == proyecto_actual
-    ].copy()
-
-    datos = datos.sort_values(
-        "Fecha_Dia"
-    )
-
-    if datos.empty:
-        st.info(
-            f"No hay información diaria disponible "
-            f"para {proyecto_actual}."
-        )
-        return
-
-    anio = int(
-        datos["Anio"].iloc[0]
-    )
-
-    mes = int(
-        datos["Mes"].iloc[0]
-    )
-
-    primer_dia = pd.Timestamp(
-        anio,
-        mes,
-        1
-    )
-
-    ultimo_dia = pd.Timestamp(
-        anio,
-        mes,
-        calendar.monthrange(
-            anio,
-            mes
-        )[1]
-    )
-
-    hoy_normalizado = (
-        pd.Timestamp.now().normalize()
-    )
-
-    if (
-        anio == hoy_normalizado.year
-        and mes == hoy_normalizado.month
-    ):
-        ultimo_dia = min(
-            ultimo_dia,
-            hoy_normalizado
-        )
-
-    calendario = pd.DataFrame({
-        "Fecha_Dia": pd.date_range(
-            primer_dia,
-            ultimo_dia,
-            freq="D"
-        )
-    })
-
-    datos = calendario.merge(
-        datos[
-            [
-                "Fecha_Dia",
-                "Energia_MWh"
-            ]
-        ],
-        on="Fecha_Dia",
-        how="left"
-    )
-
-    # Los días futuros no se incluyen.
-    # Los días sin mediciones quedan vacíos.
-    # Si prefieres mostrarlos en cero, usa:
-    # datos["Energia_MWh"] = (
-    #     datos["Energia_MWh"].fillna(0)
-    # )
-
-    # -----------------------------------------------------
-    # GRAFICO
-    # -----------------------------------------------------
+    proyecto_actual = proyectos_carrusel_disponibles[st.session_state.carrusel_indice]
+    datos = df_diarios_carrusel[df_diarios_carrusel["Proyecto"] == proyecto_actual][["Fecha_Dia", "Energia_MWh"]].copy()
+    calendario = pd.DataFrame({"Fecha_Dia": pd.date_range(FECHA_INICIO_CARRUSEL, FECHA_FIN_CARRUSEL, freq="D")})
+    datos = calendario.merge(datos, on="Fecha_Dia", how="left")
 
     figura = go.Figure()
-
     figura.add_bar(
         x=datos["Fecha_Dia"],
         y=datos["Energia_MWh"],
         name="Energía diaria",
         marker_color=COLOR_PRIMARIO,
-        width=(
-            0.58
-            * 24
-            * 60
-            * 60
-            * 1000
-        ),
-        hovertemplate=(
-            "<b>%{x|%d-%m-%Y}</b><br>"
-            "Energía: %{y:,.2f} MWh"
-            "<extra></extra>"
-        )
+        width=0.58 * 24 * 60 * 60 * 1000,
+        hovertemplate="<b>%{x|%d-%m-%Y}</b><br>Energía: %{y:,.2f} MWh<extra></extra>",
     )
-
     figura.update_layout(
         title=(
-            f"Energía diaria · "
-            f"{proyecto_actual} · "
-            f"{MESES_COMPLETOS[mes]} {anio}"
+            f"Energía diaria · {proyecto_actual} · "
+            f"{FECHA_INICIO_CARRUSEL:%d-%m-%Y} a {FECHA_FIN_CARRUSEL:%d-%m-%Y}"
         ),
-        xaxis_title="Día del mes",
+        xaxis_title="Fecha",
         yaxis_title="Energía [MWh]",
-        showlegend=False
+        showlegend=False,
     )
-
     figura.update_xaxes(
         dtick=24 * 60 * 60 * 1000,
-        tickformat="%d",
+        tickformat="%d-%m",
         range=[
-            primer_dia
-            - pd.Timedelta(hours=12),
-            ultimo_dia
-            + pd.Timedelta(hours=12)
-        ]
+            FECHA_INICIO_CARRUSEL - pd.Timedelta(hours=12),
+            FECHA_FIN_CARRUSEL + pd.Timedelta(hours=12),
+        ],
     )
+    figura.update_yaxes(rangemode="tozero")
+    aplicar_estilo_grafico(figura, altura=500, mostrar_leyenda=False, margen_inferior=60)
 
-    figura.update_yaxes(
-        rangemode="tozero"
-    )
-
-    aplicar_estilo_grafico(
-        figura,
-        altura=500,
-        mostrar_leyenda=False,
-        margen_inferior=60
-    )
-
-    clave_proyecto = (
-        quitar_tildes(
-            proyecto_actual
-        )
-        .lower()
-        .replace(" ", "_")
-    )
-
+    clave = quitar_tildes(proyecto_actual).lower().replace(" ", "_")
     st.plotly_chart(
         figura,
         use_container_width=True,
-        key=(
-            f"carrusel_"
-            f"{clave_proyecto}_"
-            f"{anio}_"
-            f"{mes}"
-        )
+        key=f"carrusel_{clave}_{FECHA_INICIO_CARRUSEL:%Y%m%d}_{FECHA_FIN_CARRUSEL:%Y%m%d}",
     )
-
-    # -----------------------------------------------------
-    # ESTADO
-    # -----------------------------------------------------
-
-    estado = (
-        "Pausado"
-        if st.session_state.carrusel_pausado
-        else (
-            f"Rotación automática cada "
-            f"{SEGUNDOS_ROTACION_GRAFICOS} segundos"
-        )
-    )
-
-    st.caption(
-        f"Vista "
-        f"{st.session_state.carrusel_indice + 1} "
-        f"de {cantidad_proyectos}"
-        f" · {estado}"
-        f" · Fuente: API"
-    )
+    estado = "Pausado" if st.session_state.carrusel_pausado else f"Rotación automática cada {SEGUNDOS_ROTACION_GRAFICOS} segundos"
+    st.caption(f"Vista {st.session_state.carrusel_indice + 1} de {cantidad} · {estado} · Fuente: API")
 
 
 mostrar_carrusel_diario()
@@ -1264,6 +1046,6 @@ with st.expander("Fuentes utilizadas por proyecto", expanded=False):
 
 st.divider()
 st.caption(
-    f"Última ejecución: {datetime.now():%d-%m-%Y %H:%M:%S} · "
-    "Actualización automática cada 12 horas · Caché API 15 minutos"
+    f"Inicio de la aplicación: {HORA_INICIO_APLICACION:%d-%m-%Y %H:%M:%S} · "
+    "Las API se actualizan al reiniciar la aplicación"
 )
