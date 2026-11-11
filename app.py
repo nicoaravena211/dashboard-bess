@@ -6,7 +6,7 @@ Qué hace:
   - Meses cerrados: se leen de budgets.xlsx (no se consultan a la API).
   - Meses pendientes y últimos 30 días: se consultan a las API del Coordinador (en paralelo y con caché).
   - PRMTE horario con CMG (preliminar o definitivo), consolidados mensual y anual en Excel.
-  - Reporte semanal (lunes a viernes) en PDF para San Pedro III, Doña Carmen y María Elena.
+  - Reporte semanal (lunes a domingo) en PDF para San Pedro III, Doña Carmen y María Elena.
 
 Secrets requeridos (Manage app > Settings > Secrets): API_KEY_PRMTE y API_KEY_CMG.
 """
@@ -95,7 +95,7 @@ ORDEN_ANUAL = ["MARIA ELENA BESS", "MARIA ELENA PFV", "SAN PEDRO III", "DOÑA CA
                "CHACAICO", "SANCLEMENTE", "TRILALEO", "COLLANCO"]
 MESES_CORTOS = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
 MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-DIAS_SEMANA = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
+DIAS_SEMANA = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
 # Barra de costo marginal por instalación (CMG horario del PRMTE y reporte semanal)
 BARRAS_CMG = {"MARIA ELENA PFV": "M.ELENA_______220", "BESS MARIA ELENA": "M.ELENA_______220",
@@ -769,7 +769,7 @@ def generar_excel_consolidado_anual(df_bess, df_proyectos, anio):
 # REPORTE SEMANAL (PDF)
 # =========================================================
 def semanas_disponibles(anio):
-    """Semanas ISO (lunes a viernes) del año hasta hoy: [(n, lunes, viernes)], la más reciente primero."""
+    """Semanas ISO (lunes a domingo) del año hasta hoy: [(n, lunes, domingo)], la más reciente primero."""
     hoy, salida = HOY.date(), []
     for n in range(1, 54):
         try:
@@ -778,7 +778,7 @@ def semanas_disponibles(anio):
             break
         if lunes > hoy:
             break
-        salida.append((n, lunes, lunes + timedelta(days=4)))
+        salida.append((n, lunes, lunes + timedelta(days=6)))
     return salida[::-1]
 
 
@@ -789,7 +789,7 @@ def calcular_semana(df, cfg, tipo, lunes):
     d["Dia"] = d["Fecha"].dt.normalize()
     d["MWh"] = d[col] / 1000
     filas = []
-    for i in range(5):
+    for i in range(7):
         dia = pd.Timestamp(lunes) + pd.Timedelta(days=i)
         x = d[(d["Dia"] == dia) & d["MWh"].notna()]
         xc = x[x["CMG USD/MWh"].notna()]
@@ -827,7 +827,7 @@ def _estilo_ejes(ax):
     ax.set_axisbelow(True)
 
 
-def crear_pdf_reporte(cfg, semana, tipo, df, filas, tot, lunes, viernes, generado):
+def crear_pdf_reporte(cfg, semana, tipo, df, filas, tot, lunes, domingo, generado):
     barra = BARRAS_CMG[cfg["id"]]
     buf = io.BytesIO()
     c = rl_canvas.Canvas(buf, pagesize=(210 * mm, 297 * mm))
@@ -851,7 +851,7 @@ def crear_pdf_reporte(cfg, semana, tipo, df, filas, tot, lunes, viernes, generad
     c.drawRightString(W - mx, 297 * mm - 25 * mm, cfg["titulo"])
     c.setFillColor(gris)
     c.setFont("Helvetica", 9)
-    c.drawRightString(W - mx, 297 * mm - 31 * mm, f"Lunes {lunes:%d-%m-%Y} a viernes {viernes:%d-%m-%Y}  ·  CMG {tipo}")
+    c.drawRightString(W - mx, 297 * mm - 31 * mm, f"Lunes {lunes:%d-%m-%Y} a domingo {domingo:%d-%m-%Y}  ·  CMG {tipo}")
     c.setStrokeColor(teal)
     c.setLineWidth(1.4)
     c.line(mx, 297 * mm - 35 * mm, W - mx, 297 * mm - 35 * mm)
@@ -881,7 +881,7 @@ def crear_pdf_reporte(cfg, semana, tipo, df, filas, tot, lunes, viernes, generad
         datos.append([f"{DIAS_SEMANA[i]} {f['fecha']:%d-%m-%Y}", fmt(f["mwh"], 1) if f["h_energia"] else "–",
                       fmt(ponderado(f), 2) if f["h_cmg"] else "–", fmt(f["ingreso"], 0) if f["h_cmg"] else "–"])
     datos.append(["Total semana", fmt(tot["mwh"], 1), fmt(pond_tot, 2), fmt(tot["ingreso"], 0)])
-    tabla = Table(datos, colWidths=[ancho * .34, ancho * .22, ancho * .26, ancho * .18], rowHeights=7 * mm)
+    tabla = Table(datos, colWidths=[ancho * .34, ancho * .22, ancho * .26, ancho * .18], rowHeights=6.2 * mm)
     tabla.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), 9), ("TEXTCOLOR", (0, 0), (-1, -1), texto),
         ("BACKGROUND", (0, 0), (-1, 0), teal), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
@@ -905,18 +905,22 @@ def crear_pdf_reporte(cfg, semana, tipo, df, filas, tot, lunes, viernes, generad
     c.drawImage(ImageReader(g1), mx, y, width=ancho, height=h1)
 
     # Gráfico 2: inyección y CMG por hora
-    sem = df[(df["Fecha"] >= pd.Timestamp(lunes)) & (df["Fecha"] < pd.Timestamp(viernes) + pd.Timedelta(days=1))].reset_index(drop=True)
+    sem = df[(df["Fecha"] >= pd.Timestamp(lunes)) & (df["Fecha"] < pd.Timestamp(domingo) + pd.Timedelta(days=1))].reset_index(drop=True)
     fig, ax = plt.subplots(figsize=(10, 3.2))
     ax.bar(range(len(sem)), sem[cfg["col"]] / 1000, color="#65BDEB", width=.9, label="Inyección horaria (MWh)")
     ax2 = ax.twinx()
     ax2.plot(range(len(sem)), sem["CMG USD/MWh"], color="#F05A28", linewidth=1.6, label=f"CMG {tipo} (USD/MWh)")
-    marcas = list(range(0, len(sem), 12))
+    marcas = list(range(0, len(sem), 24))
     ax.set_xticks(marcas)
     ax.set_xticklabels([sem["Fecha"].iloc[i].strftime("%d-%m %Hh") for i in marcas], fontsize=8)
     ax.set_ylabel("MWh", fontsize=8, color="#5E6C84")
     ax2.set_ylabel("USD/MWh", fontsize=8, color="#5E6C84")
     ax2.tick_params(colors="#5E6C84", labelsize=8)
     ax2.spines[["top"]].set_visible(False)
+    # Ambos ejes parten en 0, para que un CMG de 0 USD/MWh quede sobre la base del gráfico
+    cmg_min = sem["CMG USD/MWh"].min()
+    ax.set_ylim(bottom=0)
+    ax2.set_ylim(bottom=min(0, cmg_min) if pd.notna(cmg_min) else 0)
     _estilo_ejes(ax)
     ax.set_title("Inyección y CMG por hora", loc="left", fontsize=11, color="#172B4D", fontweight="bold")
     manijas = ax.get_legend_handles_labels()[0] + ax2.get_legend_handles_labels()[0]
@@ -930,7 +934,7 @@ def crear_pdf_reporte(cfg, semana, tipo, df, filas, tot, lunes, viernes, generad
     # Notas
     notas = [f"CMG ponderado = suma(energía x CMG) / suma(energía). Ingreso spot = energía de cada tramo de 15 min x CMG {tipo.lower()} de la barra {barra}.",
              cfg["nota"],
-             f"Horas con medida de energía: {tot['h_energia']} de 120. Horas con CMG disponible: {tot['h_cmg']}." +
+             f"Horas con medida de energía: {tot['h_energia']} de 168. Horas con CMG disponible: {tot['h_cmg']}." +
              (" Las horas sin CMG no se valorizan." if tot["h_cmg"] < tot["h_energia"] else ""),
              f"Reporte generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."]
     c.setFillColor(gris)
@@ -944,15 +948,15 @@ def crear_pdf_reporte(cfg, semana, tipo, df, filas, tot, lunes, viernes, generad
     return buf.getvalue()
 
 
-def generar_reportes_semana(semana, lunes, viernes, tipo):
+def generar_reportes_semana(semana, lunes, domingo, tipo):
     """Devuelve ({archivo.pdf: bytes}, errores, advertencias_api)."""
-    horario, adv = construir_horario(lunes.isoformat(), viernes.isoformat(), tipo, tuple(r["id"] for r in REPORTES))
+    horario, adv = construir_horario(lunes.isoformat(), domingo.isoformat(), tipo, tuple(r["id"] for r in REPORTES))
     pdfs, errores = {}, []
     for cfg in REPORTES:
         try:
             filas, tot = calcular_semana(horario[cfg["id"]], cfg, tipo, lunes)
             pdfs[f"Reporte_Semana{semana}_{cfg['titulo'].replace(' ', '_')}.pdf"] = crear_pdf_reporte(
-                cfg, semana, tipo, horario[cfg["id"]], filas, tot, lunes, viernes, ahora())
+                cfg, semana, tipo, horario[cfg["id"]], filas, tot, lunes, domingo, ahora())
         except ValueError as e:
             errores.append(str(e))
     return pdfs, errores, adv
@@ -1237,7 +1241,7 @@ with tab_port:
 
 # ---------------- Reportes y descargas ----------------
 with tab_rep:
-    st.subheader("Reporte semanal (lunes a viernes)")
+    st.subheader("Reporte semanal (lunes a domingo)")
     st.caption("Un PDF por proyecto (San Pedro III, Doña Carmen y María Elena) con generación inyectada, CMG ponderado e ingresos spot.")
     semanas = semanas_disponibles(anio)
     if not semanas:
@@ -1249,11 +1253,11 @@ with tab_rep:
                                format_func=lambda i: f"Semana {semanas[i][0]} · {semanas[i][1]:%d-%m} al {semanas[i][2]:%d-%m}"
                                + (" (en curso)" if semanas[i][2] > HOY.date() else ""), key="sel_semana")
         tipo_sem = r2.selectbox("Tipo de CMG", list(TIPOS_CMG), index=1, key="tipo_cmg_semana")
-        n_sem, lunes, viernes = semanas[sel_sem]
+        n_sem, lunes, domingo = semanas[sel_sem]
         clave_sel = (n_sem, anio, tipo_sem)
         if r3.button("Generar reportes", type="primary", width="stretch", key="b_generar_reportes"):
             with st.spinner(f"Generando reportes de la semana {n_sem}…"):
-                pdfs, errores, adv_rep = generar_reportes_semana(n_sem, lunes, viernes, tipo_sem)
+                pdfs, errores, adv_rep = generar_reportes_semana(n_sem, lunes, domingo, tipo_sem)
                 zip_buf = io.BytesIO()
                 if pdfs:
                     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
