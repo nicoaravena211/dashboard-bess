@@ -56,7 +56,7 @@ FUENTE_EXCEL = "Gadugi"  # cambia a "Calibri" si prefieres la fuente anterior de
 
 TZ = "America/Santiago"
 ANIO_OPERACIONAL = 2026
-PRECIO_PPA = 83.49  # USD/MWh
+PRECIO_PPA = 83.49  # USD/MWh. Solo se usa si un mes no está en la hoja Precios_PPA de budgets.xlsx
 TIPO_CMG_DASHBOARD = "PRELIMINAR"  # tipo de CMG para valorizar el Spot del BESS en el dashboard
 BARRA_CMG_BESS = "M.ELENA_______220"
 UMBRAL_OFFSET_CARGA_BESS_KWH = 450  # carga horaria menor a este valor = offset -> 0
@@ -72,7 +72,7 @@ MAX_HILOS = 6                 # consultas simultáneas a la API
 SEGUNDOS_ROTACION_GRAFICOS = 10
 DIAS_CARRUSEL = 30
 
-ARCHIVO_HOJAS = {"bess_bud": "Budgets", "bess_con": "Consolidado", "proy_bud": "Budgets_Proyectos", "proy_con": "Consolidado_Proyectos"}
+ARCHIVO_HOJAS = {"bess_bud": "Budgets", "bess_con": "Consolidado", "proy_bud": "Budgets_Proyectos", "proy_con": "Consolidado_Proyectos", "ppa": "Precios_PPA"}
 URL_PRMTE = "https://medidas.api.coordinador.cl/medidas-v2/measurement"
 URL_CMG = "https://sipub.api.coordinador.cl/costo-marginal-real/v4/findByDate"
 
@@ -186,7 +186,7 @@ def slug(texto):
 def normalizar_columnas_excel(df):
     eq = {"ano": "Anio", "anio": "Anio", "mes": "Mes", "proyecto": "Proyecto", "budget_generacion_mwh": "Budget_Generacion_MWh",
           "budget_ppa_mwh": "Budget_PPA_MWh", "energia_ppa_mwh": "Energia_PPA_MWh", "energia_spot_mwh": "Energia_Spot_MWh",
-          "ingreso_ppa_usd": "Ingreso_PPA_USD", "ingreso_spot_usd": "Ingreso_Spot_USD", "generacion_mwh": "Generacion_MWh"}
+          "ingreso_ppa_usd": "Ingreso_PPA_USD", "ingreso_spot_usd": "Ingreso_Spot_USD", "generacion_mwh": "Generacion_MWh", "precio_ppa_usd_mwh": "Precio_PPA_USD_MWh", "precio_ppa": "Precio_PPA_USD_MWh"}
 
     def clave(nombre):
         n = quitar_tildes(nombre).strip().replace(" ", "_").replace("-", "_")
@@ -209,6 +209,23 @@ def parse_fecha(serie):
 def periodos_de_rango(inicio, fin):
     """Meses YYYYMM que cubren un rango de fechas."""
     return [p.strftime("%Y%m") for p in pd.period_range(pd.Timestamp(inicio), pd.Timestamp(fin), freq="M")]
+
+
+def precio_ppa(precios, anio, mes):
+    return precios.get((int(anio), int(mes)), PRECIO_PPA)
+
+
+def texto_precios_semana(precios, lunes, domingo):
+    """Precio PPA de la semana. Si cruza de mes y el precio cambia, muestra ambos."""
+    claves = []
+    for i in range((domingo - lunes).days + 1):
+        d = lunes + timedelta(days=i)
+        if (d.year, d.month) not in claves:
+            claves.append((d.year, d.month))
+    partes = [(precio_ppa(precios, a, m), MESES[m - 1].lower()) for a, m in claves]
+    if len({p for p, _ in partes}) == 1:
+        return f"USD {fmt(partes[0][0], 2)}/MWh"
+    return " y ".join(f"USD {fmt(p, 2)}/MWh ({m})" for p, m in partes)
 
 
 def periodo_a_texto(periodo):
@@ -407,16 +424,25 @@ def cargar_excel(mtime):
     if (con_p["Generacion_MWh"] < 0).any():
         raise ValueError("Consolidado_Proyectos contiene generación negativa.")
     con_p["Fuente"] = "Excel consolidado"
-    return bud_b, con_b, bud_p, con_p
+    # Precio PPA por mes (hoja opcional). Si no existe, se usa PRECIO_PPA en todos los meses.
+    try:
+        ppa = _leer_hoja(ARCHIVO_HOJAS["ppa"], ["Anio", "Mes", "Precio_PPA_USD_MWh"])
+        hoja_ppa = True
+    except (ValueError, KeyError):
+        ppa, hoja_ppa = pd.DataFrame(columns=["Anio", "Mes", "Precio_PPA_USD_MWh"]), False
+    if ppa.duplicated(["Anio", "Mes"]).any() or (ppa["Precio_PPA_USD_MWh"] <= 0).any() or not ppa["Mes"].between(1, 12).all():
+        raise ValueError("Precios_PPA tiene meses duplicados, meses fuera de 1-12 o precios no positivos.")
+    precios = {(int(r.Anio), int(r.Mes)): float(r.Precio_PPA_USD_MWh) for r in ppa.itertuples()}
+    return bud_b, con_b, bud_p, con_p, precios, hoja_ppa
 
 
 # =========================================================
 # MESES PENDIENTES Y CARRUSEL (API)
 # =========================================================
 @st.cache_data(ttl=TTL_DATOS, show_spinner=False)
-def cargar_mensuales_api(pend_proyectos, pend_bess):
+def cargar_mensuales_api(pend_proyectos, pend_bess, precios_t=()):
     """pend_proyectos: ((proyecto, periodo), ...)   pend_bess: (periodo, ...)"""
-    adv = []
+    adv, precios = [], dict(precios_t)
     items = {(per, c["mpid"], c["canal"]) for proy, per in pend_proyectos for c in PROYECTOS[proy]}
     items |= {(per, m, 3) for per in pend_bess for m in BESS_MPIDS}
     brutos = lote(prmte, items)
@@ -455,7 +481,7 @@ def cargar_mensuales_api(pend_proyectos, pend_bess):
         else:
             df = df.merge(df_cmg.rename(columns={"CMG_USD_MWh": "CMG"}), on="Fecha", how="left")
             df["CMG"] = df["CMG"].fillna(0)
-        df["Precio"] = PRECIO_PPA
+        df["Precio"] = precio_ppa(precios, per[:4], per[4:6])
         df.loc[df["Tipo"] == "SPOT", "Precio"] = df["CMG"]
         df["Ingreso"] = df["MWh"] * df["Precio"]
         e = df.groupby("Tipo")["MWh"].sum()
@@ -524,7 +550,7 @@ def ingreso_horario(df_energia, columna, df_cmg, indice):
 
 
 @st.cache_data(ttl=TTL_DATOS, show_spinner=False)
-def construir_horario(inicio, fin, tipo, parques):
+def construir_horario(inicio, fin, tipo, parques, precios_t=()):
     """
     Series horarias de los parques pedidos entre dos fechas (YYYY-MM-DD).
     Devuelve ({parque: DataFrame horario}, advertencias).
@@ -534,7 +560,7 @@ def construir_horario(inicio, fin, tipo, parques):
     periodos = periodos_de_rango(inicio, fin)
     indice = pd.date_range(inicio, fin + pd.Timedelta(hours=23), freq="h")
     codigo = TIPOS_CMG[tipo]
-    adv = []
+    adv, precios = [], dict(precios_t)
 
     bess_3 = [{"mpid": m, "canal": 3} for m in BESS_MPIDS]
     bess_1 = [{"mpid": m, "canal": 1} for m in BESS_MPIDS]
@@ -593,7 +619,7 @@ def construir_horario(inicio, fin, tipo, parques):
             en_spot = (ab["Fecha"].dt.hour >= 6) & (ab["Fecha"].dt.hour < 21)
             h["Energía PPA kWh"] = a_horario(ab[~en_spot], "kWh", indice).to_numpy()
             h["Energía Spot kWh"] = a_horario(ab[en_spot], "kWh", indice).to_numpy()
-            h["Ingreso PPA USD"] = h["Energía PPA kWh"] / 1000 * PRECIO_PPA
+            h["Ingreso PPA USD"] = h["Energía PPA kWh"] / 1000 * pd.Series([precio_ppa(precios, f.year, f.month) for f in indice]).to_numpy()
         if nombre in BARRAS_CMG:
             barra = BARRAS_CMG[nombre]
             h["CMG USD/MWh"] = a_horario(cmg15[barra], "CMG_USD_MWh", indice, "mean").to_numpy()
@@ -616,10 +642,10 @@ def _fuente(**kw):
 
 
 @st.cache_data(ttl=TTL_DATOS, show_spinner=False)
-def generar_excel_prmte(inicio, fin, tipo):
+def generar_excel_prmte(inicio, fin, tipo, precios_t=()):
     """PRMTE horario de todos los parques, con CMG horario (solo Doña Carmen, San Pedro III, María Elena y BESS)."""
     parques = tuple(PROYECTOS) + ("BESS MARIA ELENA",)
-    horario, adv = construir_horario(inicio, fin, tipo, parques)
+    horario, adv = construir_horario(inicio, fin, tipo, parques, precios_t)
     col_cmg = f"CMG {tipo} USD/MWh"
     hojas, resumen = {}, []
     for nombre in parques:
@@ -1036,7 +1062,7 @@ def ponderado_spot(x):
     return x["ing_spot"] / x["spot_cmg"] if x["spot_cmg"] > 0 else None
 
 
-def crear_pdf_bess(cfg, semana, tipo, df, filas, tot, lunes, domingo, generado):
+def crear_pdf_bess(cfg, semana, tipo, df, filas, tot, lunes, domingo, generado, precios=None):
     """Reporte del BESS: inyección diaria con separación PPA / Spot, ingresos y CMG ponderado Spot."""
     barra = BARRAS_CMG[cfg["id"]]
     buf, c = _pdf_nuevo(cfg["titulo"], semana)
@@ -1083,7 +1109,7 @@ def crear_pdf_bess(cfg, semana, tipo, df, filas, tot, lunes, domingo, generado):
     _leyenda_abajo(ax, ax2, 3)
     y = _pdf_grafico(c, fig, y, .33, 3 * mm)
 
-    _pdf_notas(c, [f"PPA: energía inyectada de 21:00 a 06:00, valorizada a USD {fmt(PRECIO_PPA, 2)}/MWh. Spot: de 06:00 a 21:00, valorizada al CMG {tipo.lower()} de la barra {barra}.",
+    _pdf_notas(c, [f"PPA: energía inyectada de 21:00 a 06:00, valorizada a {texto_precios_semana(precios or {}, lunes, domingo)}. Spot: de 06:00 a 21:00, valorizada al CMG {tipo.lower()} de la barra {barra}.",
                    f"CMG ponderado Spot = suma(energía Spot x CMG) / suma(energía Spot). {cfg['nota']}",
                    f"Carga del BESS: horas con menos de {UMBRAL_OFFSET_CARGA_BESS_KWH} kWh se consideran offset y se cuentan como 0.",
                    f"Horas con medida: {tot['h_energia']} de 168. Horas Spot con CMG disponible: {tot['h_cmg']} de {tot['h_spot']}." +
@@ -1092,15 +1118,15 @@ def crear_pdf_bess(cfg, semana, tipo, df, filas, tot, lunes, domingo, generado):
     return _pdf_cerrar(buf, c)
 
 
-def generar_reportes_semana(semana, lunes, domingo, tipo):
+def generar_reportes_semana(semana, lunes, domingo, tipo, precios_t=()):
     """Devuelve ({archivo.pdf: bytes}, errores, advertencias_api)."""
-    horario, adv = construir_horario(lunes.isoformat(), domingo.isoformat(), tipo, tuple(r["id"] for r in REPORTES))
+    horario, adv = construir_horario(lunes.isoformat(), domingo.isoformat(), tipo, tuple(r["id"] for r in REPORTES), precios_t)
     pdfs, errores = {}, []
     for cfg in REPORTES:
         try:
             if cfg.get("kind") == "bess":
                 filas, tot = calcular_semana_bess(horario[cfg["id"]], tipo, lunes)
-                pdf = crear_pdf_bess(cfg, semana, tipo, horario[cfg["id"]], filas, tot, lunes, domingo, ahora())
+                pdf = crear_pdf_bess(cfg, semana, tipo, horario[cfg["id"]], filas, tot, lunes, domingo, ahora(), dict(precios_t))
             else:
                 filas, tot = calcular_semana(horario[cfg["id"]], cfg, tipo, lunes)
                 pdf = crear_pdf_reporte(cfg, semana, tipo, horario[cfg["id"]], filas, tot, lunes, domingo, ahora())
@@ -1114,19 +1140,20 @@ def generar_reportes_semana(semana, lunes, domingo, tipo):
 # CARGA DE DATOS Y UNIONES
 # =========================================================
 try:
-    df_bud_bess, df_con_bess, df_bud_proy, df_con_proy = cargar_excel(ARCHIVO_EXCEL.stat().st_mtime if ARCHIVO_EXCEL.exists() else 0)
+    df_bud_bess, df_con_bess, df_bud_proy, df_con_proy, PRECIOS_PPA, HOJA_PPA_OK = cargar_excel(ARCHIVO_EXCEL.stat().st_mtime if ARCHIVO_EXCEL.exists() else 0)
 except Exception as error:
     st.error("No fue posible validar budgets.xlsx.")
     st.info(str(error))
     st.stop()
 
+PRECIOS_T = tuple(sorted(PRECIOS_PPA.items()))  # hashable: invalida la caché si cambia algún precio
 existentes_p = {(r.Proyecto, f"{r.Anio:04d}{r.Mes:02d}") for r in df_con_proy.itertuples()}
 pend_proy = tuple((p, per) for p in PROYECTOS for per in PERIODOS_ANIO if (p, per) not in existentes_p)
 existentes_b = {f"{r.Anio:04d}{r.Mes:02d}" for r in df_con_bess.itertuples()}
 pend_bess = tuple(per for per in PERIODOS_ANIO if per not in existentes_b)
 
 with st.spinner("Consultando datos a las API del Coordinador…"):
-    api_proy, api_bess, api_bess_diario, adv_mensual = cargar_mensuales_api(pend_proy, pend_bess)
+    api_proy, api_bess, api_bess_diario, adv_mensual = cargar_mensuales_api(pend_proy, pend_bess, PRECIOS_T)
     df_carrusel, adv_carrusel = cargar_diarios_carrusel(tuple(PERIODOS_CARRUSEL), CARRUSEL_INI.isoformat(), CARRUSEL_FIN.isoformat())
 
 
@@ -1139,7 +1166,33 @@ def unir(excel, api, claves):
 
 df_proy = unir(df_con_proy, api_proy, ["Anio", "Mes", "Proyecto"])
 df_bess = unir(df_con_bess, api_bess, ["Anio", "Mes"])
-advertencias = sorted(set(adv_mensual + adv_carrusel))
+
+
+def validar_precios_ppa():
+    """Avisa si falta la hoja o un mes en Precios_PPA, o si el Excel consolidado no calza con el precio del mes."""
+    adv = []
+    if not HOJA_PPA_OK:
+        return [f"No se encontró la hoja Precios_PPA en budgets.xlsx: se usa USD {fmt(PRECIO_PPA, 2)}/MWh en todos los meses."]
+    faltan = [periodo_a_texto(per) for per in PERIODOS_ANIO if (int(per[:4]), int(per[4:6])) not in PRECIOS_PPA]
+    if faltan:
+        adv.append(f"Precios_PPA no tiene precio para {', '.join(faltan)}: se usa USD {fmt(PRECIO_PPA, 2)}/MWh.")
+    for r in df_con_bess.itertuples():
+        esperado = PRECIOS_PPA.get((r.Anio, r.Mes))
+        if not esperado or r.Energia_PPA_MWh <= 0:
+            continue
+        implicito = r.Ingreso_PPA_USD / r.Energia_PPA_MWh
+        if abs(implicito / esperado - 1) <= 0.02:
+            continue
+        cruzado = r.Ingreso_Spot_USD / r.Energia_PPA_MWh
+        if abs(cruzado / esperado - 1) <= 0.02:
+            adv.append(f"Consolidado BESS {MESES[r.Mes - 1]} {r.Anio}: Ingreso_PPA_USD e Ingreso_Spot_USD parecen estar intercambiados en budgets.xlsx "
+                       f"(Ingreso_Spot ÷ Energía_PPA da {fmt(cruzado, 2)} USD/MWh, igual al precio PPA del mes).")
+        else:
+            adv.append(f"Consolidado BESS {MESES[r.Mes - 1]} {r.Anio}: Ingreso_PPA ÷ Energía_PPA da {fmt(implicito, 2)} USD/MWh y el precio PPA del mes es {fmt(esperado, 2)}.")
+    return adv
+
+
+advertencias = sorted(set(adv_mensual + adv_carrusel + validar_precios_ppa()))
 st.session_state.setdefault("carga_ts", time.time())
 
 # =========================================================
@@ -1203,7 +1256,7 @@ if cierre_b:
     be_ac = cerr_b["Energia_Total_MWh"].sum()
     k2.metric(f"Inyección BESS (acum. a {MESES_CORTOS[cierre_b - 1]})", f"{fmt(be_ac)} MWh", f"{fmt_signo((be_ac / bb_ac - 1) * 100 if bb_ac else 0)} % vs budget")
     k3.metric(f"Ingreso BESS (acum. a {MESES_CORTOS[cierre_b - 1]})", f"USD {fmt(cerr_b['Ingreso_Total_USD'].sum(), 0)}")
-k4.metric("Mes en curso", MESES[HOY.month - 1] if HOY.year == anio else "–", f"PPA {fmt(PRECIO_PPA, 2)} USD/MWh", delta_color="off")
+k4.metric("Mes en curso", MESES[HOY.month - 1] if HOY.year == anio else "–", f"PPA {fmt(precio_ppa(PRECIOS_PPA, HOY.year, HOY.month), 2)} USD/MWh", delta_color="off")
 
 
 # =========================================================
@@ -1304,7 +1357,7 @@ with tab_bess:
         c2.metric("Energía PPA del mes", f"{fmt(f['Energia_PPA_MWh'])} MWh")
         c3.metric("Energía Spot del mes", f"{fmt(f['Energia_Spot_MWh'])} MWh")
         c4.metric("Ingreso del mes", f"USD {fmt(f['Ingreso_Total_USD'], 0)}")
-        st.caption(f"Fuente: {f['Fuente']} · Precio PPA: USD {fmt(PRECIO_PPA, 2)}/MWh")
+        st.caption(f"Fuente: {f['Fuente']} · Precio PPA: USD {fmt(precio_ppa(PRECIOS_PPA, anio, mes_b), 2)}/MWh")
 
     st.subheader("Distribución diaria de energía")
     if api_bess_diario.empty:
@@ -1405,7 +1458,7 @@ with tab_rep:
         clave_sel = (n_sem, anio, tipo_sem)
         if r3.button("Generar reportes", type="primary", width="stretch", key="b_generar_reportes"):
             with st.spinner(f"Generando reportes de la semana {n_sem}…"):
-                pdfs, errores, adv_rep = generar_reportes_semana(n_sem, lunes, domingo, tipo_sem)
+                pdfs, errores, adv_rep = generar_reportes_semana(n_sem, lunes, domingo, tipo_sem, PRECIOS_T)
                 zip_buf = io.BytesIO()
                 if pdfs:
                     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -1458,7 +1511,7 @@ with tab_rep:
             st.error("La fecha final debe ser igual o posterior a la inicial.")
         else:
             with st.spinner("Descargando y consolidando PRMTE horario…"):
-                datos_x, adv_x = generar_excel_prmte(f_ini.isoformat(), f_fin.isoformat(), tipo_prmte)
+                datos_x, adv_x = generar_excel_prmte(f_ini.isoformat(), f_fin.isoformat(), tipo_prmte, PRECIOS_T)
             st.session_state.prmte_archivo = {"datos": datos_x, "adv": adv_x, "clave": (f_ini, f_fin, tipo_prmte)}
     arch = st.session_state.get("prmte_archivo")
     if arch:
