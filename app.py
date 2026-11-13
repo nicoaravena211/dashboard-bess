@@ -307,11 +307,27 @@ def prmte(periodo, mpid, canal):
     return _con_cache(("prmte", periodo, mpid, canal), _ttl_periodo(periodo), lambda: _pedir_prmte(periodo, mpid, canal))
 
 
+def completar_huecos_cmg(df):
+    """
+    Distingue 'sin respuesta' de 'valor 0':
+      - Tramos sin registro DENTRO del periodo que el CEN ya publicó (entre el primer y el último registro) = 0 USD/MWh.
+      - Tramos posteriores al último registro publicado quedan sin dato (el CEN aún no los actualiza).
+    """
+    f = df["Fecha"].sort_values()
+    paso = f.diff().dropna().mode()
+    paso = pd.Timedelta(paso.iloc[0]) if len(paso) else pd.Timedelta(minutes=15)
+    if not pd.Timedelta(minutes=1) <= paso <= pd.Timedelta(hours=1):
+        paso = pd.Timedelta(minutes=15)
+    indice = pd.date_range(f.iloc[0], f.iloc[-1], freq=paso).union(pd.DatetimeIndex(f))
+    return df.set_index("Fecha").reindex(indice).rename_axis("Fecha").fillna(0).reset_index()
+
+
 def _pedir_cmg(periodo, barra, tipo, intentos=3):
     """
     CMG (cada 15 min) de una barra para un mes. tipo: PRELIMINAR o DEFINITIVO.
     Hasta 3 intentos (con pausa) ante errores de la API o respuestas vacías, como en el Colab. Se piden páginas hasta que venga una vacía.
-    Un CMG de 0 USD/MWh es un dato válido (es habitual en horas de alta generación solar).
+    Un CMG de 0 USD/MWh es un dato válido (es habitual en horas de alta generación solar): un registro sin valor, o un tramo faltante
+    dentro del periodo publicado, se toma como 0. Solo lo posterior al último registro publicado queda sin dato.
     """
     anio, mes = int(periodo[:4]), int(periodo[4:6])
     inicio = pd.Timestamp(anio, mes, 1)
@@ -342,10 +358,10 @@ def _pedir_cmg(periodo, barra, tipo, intentos=3):
             if {"fecha", "hra", "min", "cmg_usd_mwh_"}.issubset(df.columns):
                 df["Fecha"] = (pd.to_datetime(df["fecha"], errors="coerce") + pd.to_timedelta(convertir_numerico(df["hra"]).fillna(0), unit="h")
                                + pd.to_timedelta(convertir_numerico(df["min"]).fillna(0), unit="m"))
-                df["CMG_USD_MWh"] = convertir_numerico(df["cmg_usd_mwh_"])
-                df = df.dropna(subset=["Fecha", "CMG_USD_MWh"]).groupby("Fecha", as_index=False).agg(CMG_USD_MWh=("CMG_USD_MWh", "mean"))
+                df["CMG_USD_MWh"] = convertir_numerico(df["cmg_usd_mwh_"]).fillna(0)  # registro publicado sin valor = 0 USD/MWh
+                df = df.dropna(subset=["Fecha"]).groupby("Fecha", as_index=False).agg(CMG_USD_MWh=("CMG_USD_MWh", "mean"))
                 if not df.empty:
-                    return df, None
+                    return completar_huecos_cmg(df), None
             error = "formato inesperado"
         elif error is None:
             error = "sin registros"
@@ -1218,7 +1234,7 @@ def crear_informe_solar(cfg, semana, tipo, df, ini, fin, ini_mes, budget_mes, ge
     y = p.grafico(y, grafico_mes_dias(filas_m, tipo), f"Mes: generación diaria y CMG ({MESES[fin.month - 1].lower()})")
     p.notas(y, [_nota_cmg(tipo),
                 "CMG 24h: media aritmética de los CMG horarios del día. CMG ponderado: suma(energía x CMG) / suma(energía). "
-                "Ingreso SPOT: energía de cada tramo de 15 minutos x CMG de la barra.",
+                "Ingreso SPOT: energía de cada tramo de 15 minutos x CMG de la barra. Los tramos sin valor dentro del periodo publicado por el CEN se consideran 0 USD/MWh.",
                 cfg["nota"],
                 f"Horas con medida de energía en la semana: {tot['h_energia']} de {tot['h_total']}; con CMG disponible: {tot['h_cmg']}."
                 + (" Las horas sin CMG no se valorizan." if tot["h_cmg"] < tot["h_energia"] else ""),
@@ -1274,7 +1290,8 @@ def crear_informe_bess(cfg, semana, tipo, df, ini, fin, ini_mes, budget_bess, pr
     p.notas(y, [_nota_cmg(tipo),
                 f"PPA: energía inyectada de 21:00 a 06:00, valorizada a {texto_precios_semana(precios or {}, ini, fin)}. "
                 f"Spot: de 06:00 a 21:00, valorizada al CMG {tipo.lower()} de la barra {barra}.",
-                "CMG 24h: media aritmética de los CMG horarios del día. CMG ponderado Spot: suma(energía Spot x CMG) / suma(energía Spot). " + cfg["nota"],
+                "CMG 24h: media aritmética de los CMG horarios del día. CMG ponderado Spot: suma(energía Spot x CMG) / suma(energía Spot). "
+                "Los tramos sin valor dentro del periodo publicado por el CEN se consideran 0 USD/MWh. " + cfg["nota"],
                 f"Horas con medida en la semana: {tot['h_energia']} de {tot['h_total']}. Horas Spot con CMG disponible: {tot['h_cmg']} de {tot['h_spot']}."
                 + (" Las horas sin CMG no se valorizan." if tot["h_cmg"] < tot["h_spot"] else ""),
                 f"Informe generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."])
