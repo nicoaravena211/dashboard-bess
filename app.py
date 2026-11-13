@@ -31,10 +31,13 @@ import streamlit as st  # noqa: E402
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side  # noqa: E402
 from openpyxl.utils import get_column_letter  # noqa: E402
 from reportlab.lib import colors  # noqa: E402
+from reportlab.lib.enums import TA_JUSTIFY  # noqa: E402
+from reportlab.lib.pagesizes import letter  # noqa: E402
+from reportlab.lib.styles import ParagraphStyle  # noqa: E402
 from reportlab.lib.units import mm  # noqa: E402
 from reportlab.lib.utils import ImageReader  # noqa: E402
 from reportlab.pdfgen import canvas as rl_canvas  # noqa: E402
-from reportlab.platypus import Table, TableStyle  # noqa: E402
+from reportlab.platypus import Paragraph, Table, TableStyle  # noqa: E402
 
 # =========================================================
 # CONFIGURACION GENERAL
@@ -108,13 +111,13 @@ TIPOS_CMG = {"Definitivo": "DEFINITIVO", "Preliminar": "PRELIMINAR"}
 
 # Reporte semanal: una ficha por proyecto
 REPORTES = [
-    {"id": "SAN PEDRO III", "titulo": "San Pedro III", "col": "Inyección kWh",
+    {"id": "SAN PEDRO III", "titulo": "San Pedro III", "planta": "Planta Solar San Pedro III", "proyecto": "Proyecto San Pedro III Solar", "col": "Inyección kWh",
      "nota": "Inyección en el punto de medida de San Pedro III (JT1 + JT2)."},
-    {"id": "DOÑA CARMEN", "titulo": "Doña Carmen", "col": "Inyección kWh",
+    {"id": "DOÑA CARMEN", "titulo": "Doña Carmen", "planta": "Planta Solar Doña Carmen", "proyecto": "Proyecto Doña Carmen Solar", "col": "Inyección kWh",
      "nota": "Inyección en el punto de medida de Doña Carmen."},
-    {"id": "MARIA ELENA PFV", "titulo": "María Elena PFV", "col": COL_PFV_REPORTE,
+    {"id": "MARIA ELENA PFV", "titulo": "María Elena PFV", "planta": "Planta Solar María Elena", "proyecto": "Proyecto María Elena Solar", "col": COL_PFV_REPORTE,
      "nota": "Inyección de la PFV separada del BESS: inyección del punto JT1 menos la inyección del BESS, tramo a tramo de 15 min (mínimo 0)."},
-    {"id": "BESS MARIA ELENA", "titulo": "BESS María Elena", "kind": "bess",
+    {"id": "BESS MARIA ELENA", "titulo": "BESS María Elena", "planta": "BESS María Elena", "proyecto": "Proyecto BESS María Elena", "kind": "bess",
      "nota": "Inyección del BESS: suma de sus 4 puntos de medida (valor absoluto)."},
 ]
 
@@ -304,38 +307,51 @@ def prmte(periodo, mpid, canal):
     return _con_cache(("prmte", periodo, mpid, canal), _ttl_periodo(periodo), lambda: _pedir_prmte(periodo, mpid, canal))
 
 
-def _pedir_cmg(periodo, barra, tipo):
-    """CMG (cada 15 min) de una barra para un mes. Se pide página a página hasta que venga vacía."""
+def _pedir_cmg(periodo, barra, tipo, intentos=3):
+    """
+    CMG (cada 15 min) de una barra para un mes. tipo: PRELIMINAR o DEFINITIVO.
+    Hasta 3 intentos (con pausa) ante errores de la API o respuestas vacías, como en el Colab. Se piden páginas hasta que venga una vacía.
+    Un CMG de 0 USD/MWh es un dato válido (es habitual en horas de alta generación solar).
+    """
     anio, mes = int(periodo[:4]), int(periodo[4:6])
     inicio = pd.Timestamp(anio, mes, 1)
     fin = min(pd.Timestamp(anio, mes, calendar.monthrange(anio, mes)[1]), ahora().normalize())
     if fin < inicio:
         return None, "mes futuro"
-    registros, pagina = [], 0
-    while pagina < 100:
-        params = {"startDate": inicio.strftime("%Y-%m-%d"), "endDate": fin.strftime("%Y-%m-%d"), "page": pagina, "limit": 5000,
-                  "type": tipo, "bar_transf": barra, "user_key": API_KEY_CMG}
-        try:
-            r = requests.get(URL_CMG, params=params, timeout=60)
-            if r.status_code != 200:
-                return None, f"respuesta HTTP {r.status_code}"
-            datos = r.json().get("data", [])
-        except (requests.RequestException, ValueError) as e:
-            return None, f"error de comunicación ({type(e).__name__})"
-        if not datos:
-            break
-        registros.extend(datos)
-        pagina += 1
-    if not registros:
-        return None, "sin registros"
-    df = pd.DataFrame(registros)
-    if not {"fecha", "hra", "min", "cmg_usd_mwh_"}.issubset(df.columns):
-        return None, "formato inesperado"
-    df["Fecha"] = (pd.to_datetime(df["fecha"], errors="coerce") + pd.to_timedelta(convertir_numerico(df["hra"]).fillna(0), unit="h")
-                   + pd.to_timedelta(convertir_numerico(df["min"]).fillna(0), unit="m"))
-    df["CMG_USD_MWh"] = convertir_numerico(df["cmg_usd_mwh_"])
-    df = df.dropna(subset=["Fecha", "CMG_USD_MWh"]).groupby("Fecha", as_index=False).agg(CMG_USD_MWh=("CMG_USD_MWh", "mean"))
-    return (df, None) if not df.empty else (None, "sin registros")
+    error = "sin registros"
+    for intento in range(intentos):
+        registros, pagina, error = [], 0, None
+        while pagina < 100:
+            params = {"startDate": inicio.strftime("%Y-%m-%d"), "endDate": fin.strftime("%Y-%m-%d"), "page": pagina, "limit": 5000,
+                      "type": tipo, "bar_transf": barra, "user_key": API_KEY_CMG}
+            try:
+                r = requests.get(URL_CMG, params=params, timeout=60)
+                if r.status_code != 200:
+                    error, registros = f"respuesta HTTP {r.status_code}", []
+                    break
+                datos = r.json().get("data", [])
+            except (requests.RequestException, ValueError) as e:
+                error, registros = f"error de comunicación ({type(e).__name__})", []
+                break
+            if not datos:
+                break
+            registros.extend(datos)
+            pagina += 1
+        if registros:
+            df = pd.DataFrame(registros)
+            if {"fecha", "hra", "min", "cmg_usd_mwh_"}.issubset(df.columns):
+                df["Fecha"] = (pd.to_datetime(df["fecha"], errors="coerce") + pd.to_timedelta(convertir_numerico(df["hra"]).fillna(0), unit="h")
+                               + pd.to_timedelta(convertir_numerico(df["min"]).fillna(0), unit="m"))
+                df["CMG_USD_MWh"] = convertir_numerico(df["cmg_usd_mwh_"])
+                df = df.dropna(subset=["Fecha", "CMG_USD_MWh"]).groupby("Fecha", as_index=False).agg(CMG_USD_MWh=("CMG_USD_MWh", "mean"))
+                if not df.empty:
+                    return df, None
+            error = "formato inesperado"
+        elif error is None:
+            error = "sin registros"
+        if intento < intentos - 1:
+            time.sleep(3 * (intento + 1))
+    return None, f"{error} (tras {intentos} intentos)"
 
 
 def cmg(periodo, barra, tipo):
@@ -811,47 +827,96 @@ def generar_excel_consolidado_anual(df_bess, df_proyectos, anio):
 
 
 # =========================================================
-# REPORTE SEMANAL (PDF)
+# INFORME SEMANAL (PDF, formato corporativo de Atlantica)
 # =========================================================
-def semanas_disponibles(anio):
-    """Semanas ISO (lunes a domingo) del año hasta hoy: [(n, lunes, domingo)], la más reciente primero."""
-    hoy, salida = HOY.date(), []
-    for n in range(1, 54):
-        try:
-            lunes = date.fromisocalendar(anio, n, 1)
-        except ValueError:
-            break
-        if lunes > hoy:
-            break
-        salida.append((n, lunes, lunes + timedelta(days=6)))
-    return salida[::-1]
+DIAS_PERIODO = 7                 # días del informe; terminan en el último día completo (ayer)
+VERSION_INFORME = "00"
+TEAL = colors.HexColor("#004F5F")  # color de títulos y líneas del formato corporativo
+VERDE_LOGO = colors.Color(110 / 255, 211 / 255, 75 / 255)
+GRIS_TXT = colors.HexColor("#5E6C84")
+PG_W, PG_H = letter
+M_X = 70                         # margen lateral (pt)
+ANCHO = PG_W - 2 * M_X
+C_ENERGIA, C_PPA, C_SPOT, C_CMG24, C_CMGP = "#006072", "#006072", "#6ED34B", "#F05A28", "#E0A100"
 
 
-def calcular_semana(df, cfg, tipo, lunes):
-    """Totales por día y de la semana. CMG ponderado = suma(energía x CMG) / suma(energía)."""
-    col = cfg["col"]
-    d = df.copy()
-    d["Dia"] = d["Fecha"].dt.normalize()
-    d["MWh"] = d[col] / 1000
-    filas = []
-    for i in range(7):
-        dia = pd.Timestamp(lunes) + pd.Timedelta(days=i)
-        x = d[(d["Dia"] == dia) & d["MWh"].notna()]
-        xc = x[x["CMG USD/MWh"].notna()]
-        filas.append({"fecha": dia, "mwh": x["MWh"].sum(), "mwh_cmg": xc["MWh"].sum(), "ingreso": xc["Ingreso USD"].sum(),
-                      "h_energia": len(x), "h_cmg": len(xc)})
-    tot = {k: sum(f[k] for f in filas) for k in ("mwh", "mwh_cmg", "ingreso", "h_energia", "h_cmg")}
-    if tot["h_energia"] == 0:
-        raise ValueError(f"Sin datos de inyección para {cfg['titulo']} en esa semana.")
-    if tot["h_cmg"] == 0:
-        sugerencia = ("El definitivo suele publicarse con retraso; prueba con Preliminar." if tipo == "Definitivo"
-                      else "Prueba con Definitivo.")
-        raise ValueError(f"No hay CMG {tipo} para {cfg['titulo']} en esa semana. {sugerencia}")
-    return filas, tot
+def periodo_informe(fin):
+    """(inicio, fin, inicio_mes) del informe. 'fin' es el último día completo."""
+    fin = pd.Timestamp(fin).normalize()
+    return fin - pd.Timedelta(days=DIAS_PERIODO - 1), fin, fin.replace(day=1)
+
+
+def dia_corto(f):
+    return f"{f:%d}-{MESES_CORTOS[f.month - 1].lower()}"
+
+
+def _recortar(df, ini, fin):
+    return df[(df["Fecha"] >= pd.Timestamp(ini)) & (df["Fecha"] < pd.Timestamp(fin) + pd.Timedelta(days=1))].copy()
 
 
 def ponderado(x):
     return x["ingreso"] / x["mwh_cmg"] if x["mwh_cmg"] > 0 else None
+
+
+def ponderado_spot(x):
+    return x["ing_spot"] / x["spot_cmg"] if x["spot_cmg"] > 0 else None
+
+
+def resumen_dias(df, col, ini, fin):
+    """Resumen diario y total. CMG 24h = media de los CMG horarios del día; CMG ponderado = suma(energía x CMG) / suma(energía)."""
+    d = _recortar(df, ini, fin)
+    d["Dia"] = d["Fecha"].dt.normalize()
+    d["MWh"] = d[col] / 1000
+    filas = []
+    for dia in pd.date_range(ini, fin, freq="D"):
+        x = d[d["Dia"] == dia]
+        xe = x[x["MWh"].notna()]
+        xc = xe[xe["CMG USD/MWh"].notna()]
+        filas.append({"fecha": dia, "mwh": xe["MWh"].sum(), "mwh_cmg": xc["MWh"].sum(), "ingreso": xc["Ingreso USD"].sum(),
+                      "cmg24": x["CMG USD/MWh"].mean(), "h_energia": len(xe), "h_cmg": len(xc), "h_total": 24})
+    tot = {k: sum(f[k] for f in filas) for k in ("mwh", "mwh_cmg", "ingreso", "h_energia", "h_cmg", "h_total")}
+    tot["cmg24"] = d["CMG USD/MWh"].mean()
+    return filas, tot
+
+
+def resumen_dias_bess(df, ini, fin):
+    """BESS: energía PPA (21:00-06:00) y Spot (06:00-21:00) por día, con su valorización."""
+    d = _recortar(df, ini, fin)
+    d["Dia"] = d["Fecha"].dt.normalize()
+    filas = []
+    for dia in pd.date_range(ini, fin, freq="D"):
+        x = d[d["Dia"] == dia]
+        con_e = x[x["Inyección kWh"].notna()]
+        spot = con_e[(con_e["Fecha"].dt.hour >= 6) & (con_e["Fecha"].dt.hour < 21)]
+        spot_cmg = spot[spot["CMG USD/MWh"].notna()]
+        filas.append({"fecha": dia, "ppa": con_e["Energía PPA kWh"].sum() / 1000, "spot": con_e["Energía Spot kWh"].sum() / 1000,
+                      "spot_cmg": spot_cmg["Energía Spot kWh"].sum() / 1000, "ing_ppa": con_e["Ingreso PPA USD"].sum(),
+                      "ing_spot": spot_cmg["Ingreso Spot USD"].sum(), "cmg24": x["CMG USD/MWh"].mean(),
+                      "h_energia": len(con_e), "h_spot": len(spot), "h_cmg": len(spot_cmg), "h_total": 24})
+    tot = {k: sum(f[k] for f in filas) for k in ("ppa", "spot", "spot_cmg", "ing_ppa", "ing_spot", "h_energia", "h_spot", "h_cmg", "h_total")}
+    tot["cmg24"] = d["CMG USD/MWh"].mean()
+    return filas, tot
+
+
+def validar_resumen(tot, titulo):
+    """Solo se exige energía medida. Si falta el CMG, el informe se emite igual con un aviso."""
+    if tot["h_energia"] == 0:
+        raise ValueError(f"Sin datos de inyección para {titulo} en ese periodo.")
+
+
+def aviso_cmg(tot, tipo, bess=False):
+    """Texto de aviso cuando el CEN aún no publica (o publicó solo en parte) los costos marginales del periodo."""
+    ref = tot["h_spot"] if bess else tot["h_energia"]
+    if ref == 0:
+        return None
+    if tot["h_cmg"] == 0:
+        extra = " Los ingresos PPA no dependen del CMG y sí se informan." if bess else ""
+        return (f"Los registros del CEN referentes a costos marginales ({tipo.lower()}) aún no se han actualizado para este periodo. "
+                f"El informe se emite sin CMG ni ingresos SPOT; esos valores se completarán cuando el CEN publique la información.{extra}")
+    if tot["h_cmg"] < ref:
+        return (f"Los registros del CEN de costos marginales ({tipo.lower()}) están incompletos para parte del periodo "
+                f"(CMG disponible en {tot['h_cmg']} de {ref} horas). Las horas sin CMG no se valorizan.")
+    return None
 
 
 def _grafico_png(figura):
@@ -872,105 +937,14 @@ def _estilo_ejes(ax):
     ax.set_axisbelow(True)
 
 
-PDF_W, PDF_H, PDF_MX = 210 * mm, 297 * mm, 15 * mm
-PDF_ANCHO = PDF_W - 2 * PDF_MX
-TEAL = colors.Color(*[v / 255 for v in COLOR_LOGO])
-GRIS, TEXTO = colors.HexColor("#5E6C84"), colors.HexColor("#172B4D")
-
-
-def _pdf_encabezado(c, titulo, semana, tipo, lunes, domingo):
-    if LOGO.exists():
-        img = ImageReader(str(LOGO))
-        iw, ih = img.getSize()
-        lw = 46 * mm
-        c.drawImage(img, PDF_MX, PDF_H - 11 * mm - lw * ih / iw, width=lw, height=lw * ih / iw, mask="auto")
-    c.setFillColor(TEAL)
-    c.setFont("Helvetica-Bold", 21)
-    c.drawRightString(PDF_W - PDF_MX, PDF_H - 18 * mm, f"Reporte semana {semana}")
-    c.setFont("Helvetica-Bold", 13)
-    c.drawRightString(PDF_W - PDF_MX, PDF_H - 25 * mm, titulo)
-    c.setFillColor(GRIS)
-    c.setFont("Helvetica", 9)
-    c.drawRightString(PDF_W - PDF_MX, PDF_H - 31 * mm, f"Lunes {lunes:%d-%m-%Y} a domingo {domingo:%d-%m-%Y}  ·  CMG {tipo}")
-    c.setStrokeColor(TEAL)
-    c.setLineWidth(1.4)
-    c.line(PDF_MX, PDF_H - 35 * mm, PDF_W - PDF_MX, PDF_H - 35 * mm)
-
-
-def _pdf_kpis(c, kpis):
-    """kpis: [(etiqueta, valor, detalle|None)]. Devuelve la coordenada y de la base de las tarjetas."""
-    n = len(kpis)
-    kw = (PDF_ANCHO - (n - 1) * 4 * mm) / n
-    y = PDF_H - 61 * mm
-    for i, (etiqueta, valor, detalle) in enumerate(kpis):
-        x = PDF_MX + i * (kw + 4 * mm)
-        c.setFillColor(colors.HexColor("#F5F7FA"))
-        c.setStrokeColor(colors.HexColor("#DFE1E6"))
-        c.setLineWidth(.6)
-        c.roundRect(x, y, kw, 21 * mm, 2 * mm, fill=1, stroke=1)
-        c.setFillColor(GRIS)
-        c.setFont("Helvetica", 8.5)
-        c.drawString(x + 4 * mm, y + 15.5 * mm, etiqueta)
-        c.setFillColor(TEXTO)
-        c.setFont("Helvetica-Bold", 14 if n <= 3 else 12.5)
-        c.drawString(x + 4 * mm, y + 8.5 * mm, valor)
-        if detalle:
-            c.setFillColor(GRIS)
-            c.setFont("Helvetica", 7.5)
-            c.drawString(x + 4 * mm, y + 3.6 * mm, detalle)
-    return y
-
-
-def _pdf_tabla(c, datos, fracciones, y_tope, fuente=9):
-    """Dibuja la tabla con encabezado verde azulado y fila final de totales. Devuelve la y de su base."""
-    tabla = Table(datos, colWidths=[PDF_ANCHO * f for f in fracciones], rowHeights=6.2 * mm)
-    tabla.setStyle(TableStyle([
-        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), fuente), ("TEXTCOLOR", (0, 0), (-1, -1), TEXTO),
-        ("BACKGROUND", (0, 0), (-1, 0), TEAL), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("ALIGN", (1, 0), (-1, -1), "RIGHT"), ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#DCE6F1")), ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("GRID", (0, 0), (-1, -1), .5, colors.HexColor("#DFE1E6")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5)]))
-    _, alto = tabla.wrapOn(c, PDF_ANCHO, 120 * mm)
-    tabla.drawOn(c, PDF_MX, y_tope - alto)
-    return y_tope - alto
-
-
-def _pdf_grafico(c, figura, y_tope, alto_rel, espacio):
-    """Inserta una figura de matplotlib a todo el ancho. Devuelve la y de su base."""
-    alto = PDF_ANCHO * alto_rel
-    y = y_tope - espacio - alto
-    c.drawImage(ImageReader(_grafico_png(figura)), PDF_MX, y, width=PDF_ANCHO, height=alto)
-    return y
-
-
-def _pdf_notas(c, notas, y):
-    c.setFillColor(GRIS)
-    c.setFont("Helvetica", 7.5)
-    y -= 5 * mm
-    for n in notas:
-        c.drawString(PDF_MX, y, n)
-        y -= 3.6 * mm
-
-
-def _pdf_nuevo(titulo, semana):
-    buf = io.BytesIO()
-    c = rl_canvas.Canvas(buf, pagesize=(PDF_W, PDF_H))
-    c.setTitle(f"Reporte semana {semana} · {titulo}")
-    return buf, c
-
-
-def _pdf_cerrar(buf, c):
-    c.showPage()
-    c.save()
-    return buf.getvalue()
-
-
-def _ejes_cmg(ax, ax2, sem):
+def _ejes_doble(ax, ax2, cmg_valores):
     """Ambos ejes parten en 0, para que un CMG de 0 USD/MWh quede sobre la base del gráfico."""
-    cmg_min = sem["CMG USD/MWh"].min()
+    minimo = pd.Series(cmg_valores, dtype=float).min()
     ax.set_ylim(bottom=0)
-    ax2.set_ylim(bottom=min(0, cmg_min) if pd.notna(cmg_min) else 0)
+    if pd.isna(minimo):
+        ax2.set_ylim(0, 50)  # sin CMG: eje fijo para que el gráfico no muestre una escala sin sentido
+    else:
+        ax2.set_ylim(bottom=min(0, minimo))
     ax.set_ylabel("MWh", fontsize=8, color="#5E6C84")
     ax2.set_ylabel("USD/MWh", fontsize=8, color="#5E6C84")
     ax2.tick_params(colors="#5E6C84", labelsize=8)
@@ -978,162 +952,354 @@ def _ejes_cmg(ax, ax2, sem):
     _estilo_ejes(ax)
 
 
-def _leyenda_abajo(ax, ax2, columnas):
+def _leyenda(ax, ax2, columnas):
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, loc="upper center", bbox_to_anchor=(.5, -.12), ncol=columnas, frameon=False, fontsize=8)
+    ax.legend(h1 + h2, l1 + l2, loc="upper center", bbox_to_anchor=(.5, -.13), ncol=columnas, frameon=False, fontsize=8)
 
 
-def _semana_horas(df, lunes, domingo):
-    return df[(df["Fecha"] >= pd.Timestamp(lunes)) & (df["Fecha"] < pd.Timestamp(domingo) + pd.Timedelta(days=1))].reset_index(drop=True)
-
-
-def _marcas_horas(ax, sem):
+def grafico_semana_horas(df, col, ini, fin, tipo, bess=False):
+    """Inyección horaria del periodo (barras) y CMG (línea)."""
+    sem = _recortar(df, ini, fin).reset_index(drop=True)
+    x = range(len(sem))
+    fig, ax = plt.subplots(figsize=(10, 3.3))
+    if bess:
+        ax.bar(x, sem["Energía PPA kWh"].fillna(0) / 1000, color=C_PPA, width=.9, label="Inyección PPA (MWh)")
+        ax.bar(x, sem["Energía Spot kWh"].fillna(0) / 1000, color=C_SPOT, width=.9, label="Inyección Spot (MWh)")
+    else:
+        ax.bar(x, sem[col] / 1000, color=C_ENERGIA, width=.9, label="Inyección horaria (MWh)")
+    ax2 = ax.twinx()
+    ax2.plot(x, sem["CMG USD/MWh"], color=C_CMG24, linewidth=1.5, label=f"CMG {tipo} (USD/MWh)")
     marcas = list(range(0, len(sem), 24))
     ax.set_xticks(marcas)
     ax.set_xticklabels([sem["Fecha"].iloc[i].strftime("%d-%m %Hh") for i in marcas], fontsize=8)
+    _ejes_doble(ax, ax2, sem["CMG USD/MWh"])
+    if not sem["CMG USD/MWh"].notna().any():
+        ax.text(.5, .9, "Sin CMG disponible: registros del CEN no actualizados", transform=ax.transAxes, ha="center", fontsize=9, color="#8A4B00",
+                bbox=dict(facecolor="white", edgecolor="none", alpha=.9))
+    _leyenda(ax, ax2, 3 if bess else 2)
+    return fig
 
 
-def crear_pdf_reporte(cfg, semana, tipo, df, filas, tot, lunes, domingo, generado):
-    """Reporte de un proyecto con medida única (San Pedro III, Doña Carmen, María Elena PFV)."""
-    barra = BARRAS_CMG[cfg["id"]]
-    buf, c = _pdf_nuevo(cfg["titulo"], semana)
-    _pdf_encabezado(c, cfg["titulo"], semana, tipo, lunes, domingo)
-    pond_tot = ponderado(tot)
-    y_k = _pdf_kpis(c, [("Generación inyectada", f"{fmt(tot['mwh'], 1)} MWh", None), ("CMG ponderado", f"USD {fmt(pond_tot, 2)}/MWh", None),
-                        ("Ingresos spot", f"USD {fmt(tot['ingreso'], 0)}", None)])
-    datos = [["Día", "Inyección (MWh)", "CMG ponderado (USD/MWh)", "Ingreso spot (USD)"]]
-    for i, f in enumerate(filas):
-        datos.append([f"{DIAS_SEMANA[i]} {f['fecha']:%d-%m-%Y}", fmt(f["mwh"], 1) if f["h_energia"] else "–",
-                      fmt(ponderado(f), 2) if f["h_cmg"] else "–", fmt(f["ingreso"], 0) if f["h_cmg"] else "–"])
-    datos.append(["Total semana", fmt(tot["mwh"], 1), fmt(pond_tot, 2), fmt(tot["ingreso"], 0)])
-    y = _pdf_tabla(c, datos, (.34, .22, .26, .18), y_k - 5 * mm)
-
-    etiquetas = [f"{DIAS_SEMANA[i][:3]} {f['fecha']:%d-%m}" for i, f in enumerate(filas)]
-    fig, ax = plt.subplots(figsize=(10, 2.9))
-    ax.bar(etiquetas, [f["mwh"] if f["h_energia"] else 0 for f in filas], color="#1565C0", width=.55)
-    ax.set_title("Generación inyectada por día (MWh)", loc="left", fontsize=11, color="#172B4D", fontweight="bold")
-    _estilo_ejes(ax)
-    y = _pdf_grafico(c, fig, y, .29, 4 * mm)
-
-    sem = _semana_horas(df, lunes, domingo)
-    fig, ax = plt.subplots(figsize=(10, 3.2))
-    ax.bar(range(len(sem)), sem[cfg["col"]] / 1000, color="#65BDEB", width=.9, label="Inyección horaria (MWh)")
+def grafico_mes_dias(filas, tipo, bess=False):
+    """Generación diaria del mes (barras) con CMG 24h y CMG ponderado (líneas)."""
+    x = list(range(len(filas)))
+    fig, ax = plt.subplots(figsize=(10, 3.3))
+    if bess:
+        ppa, spot = [f["ppa"] for f in filas], [f["spot"] for f in filas]
+        ax.bar(x, ppa, color=C_PPA, width=.65, label="PPA (MWh)")
+        ax.bar(x, spot, bottom=ppa, color=C_SPOT, width=.65, label="Spot (MWh)")
+        pond = [ponderado_spot(f) if f["h_cmg"] else None for f in filas]
+        etiqueta_p = "CMG ponderado Spot"
+    else:
+        ax.bar(x, [f["mwh"] if f["h_energia"] else 0 for f in filas], color=C_ENERGIA, width=.65, label="Generación (MWh)")
+        pond = [ponderado(f) if f["h_cmg"] else None for f in filas]
+        etiqueta_p = "CMG ponderado"
+    cmg24 = [None if pd.isna(f["cmg24"]) else f["cmg24"] for f in filas]
     ax2 = ax.twinx()
-    ax2.plot(range(len(sem)), sem["CMG USD/MWh"], color="#F05A28", linewidth=1.6, label=f"CMG {tipo} (USD/MWh)")
-    _marcas_horas(ax, sem)
-    _ejes_cmg(ax, ax2, sem)
-    ax.set_title("Inyección y CMG por hora", loc="left", fontsize=11, color="#172B4D", fontweight="bold")
-    _leyenda_abajo(ax, ax2, 2)
-    y = _pdf_grafico(c, fig, y, .33, 3 * mm)
-
-    _pdf_notas(c, [f"CMG ponderado = suma(energía x CMG) / suma(energía). Ingreso spot = energía de cada tramo de 15 min x CMG {tipo.lower()} de la barra {barra}.",
-                   cfg["nota"],
-                   f"Horas con medida de energía: {tot['h_energia']} de 168. Horas con CMG disponible: {tot['h_cmg']}." +
-                   (" Las horas sin CMG no se valorizan." if tot["h_cmg"] < tot["h_energia"] else ""),
-                   f"Reporte generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."], y)
-    return _pdf_cerrar(buf, c)
-
-
-def calcular_semana_bess(df, tipo, lunes):
-    """BESS: energía PPA (21:00-06:00) y Spot (06:00-21:00) por día, con su valorización."""
-    d = df.copy()
-    d["Dia"] = d["Fecha"].dt.normalize()
-    filas = []
-    for i in range(7):
-        x = d[d["Dia"] == pd.Timestamp(lunes) + pd.Timedelta(days=i)]
-        con_e = x[x["Inyección kWh"].notna()]
-        spot = con_e[(con_e["Fecha"].dt.hour >= 6) & (con_e["Fecha"].dt.hour < 21)]
-        spot_cmg = spot[spot["CMG USD/MWh"].notna()]
-        filas.append({"fecha": pd.Timestamp(lunes) + pd.Timedelta(days=i), "ppa": con_e["Energía PPA kWh"].sum() / 1000,
-                      "spot": con_e["Energía Spot kWh"].sum() / 1000, "spot_cmg": spot_cmg["Energía Spot kWh"].sum() / 1000,
-                      "ing_ppa": con_e["Ingreso PPA USD"].sum(), "ing_spot": spot_cmg["Ingreso Spot USD"].sum(),
-                      "carga": x["Carga BESS kWh"].sum() / 1000, "h_energia": len(con_e), "h_spot": len(spot), "h_cmg": len(spot_cmg)})
-    tot = {k: sum(f[k] for f in filas) for k in ("ppa", "spot", "spot_cmg", "ing_ppa", "ing_spot", "carga", "h_energia", "h_spot", "h_cmg")}
-    if tot["h_energia"] == 0:
-        raise ValueError("Sin datos de inyección para BESS María Elena en esa semana.")
-    if tot["h_spot"] > 0 and tot["h_cmg"] == 0:
-        sugerencia = ("El definitivo suele publicarse con retraso; prueba con Preliminar." if tipo == "Definitivo" else "Prueba con Definitivo.")
-        raise ValueError(f"No hay CMG {tipo} para BESS María Elena en esa semana. {sugerencia}")
-    return filas, tot
+    ax2.plot(x, cmg24, color=C_CMG24, linewidth=1.4, marker="o", markersize=3, label="CMG 24h")
+    ax2.plot(x, pond, color=C_CMGP, linewidth=1.4, marker="o", markersize=3, label=etiqueta_p)
+    paso = 1 if len(filas) <= 16 else 2
+    ax.set_xticks(x[::paso])
+    ax.set_xticklabels([f["fecha"].strftime("%d") for f in filas][::paso], fontsize=8)
+    ax.set_xlabel("Día del mes", fontsize=8, color="#5E6C84")
+    _ejes_doble(ax, ax2, [v for v in cmg24 + pond if v is not None])
+    if not any(v is not None for v in cmg24 + pond):
+        ax.text(.5, .9, "Sin CMG disponible: registros del CEN no actualizados", transform=ax.transAxes, ha="center", fontsize=9, color="#8A4B00",
+                bbox=dict(facecolor="white", edgecolor="none", alpha=.9))
+    _leyenda(ax, ax2, 4)
+    return fig
 
 
-def ponderado_spot(x):
-    return x["ing_spot"] / x["spot_cmg"] if x["spot_cmg"] > 0 else None
+class InformePDF:
+    """Informe en el formato corporativo: portada, encabezado con logo y línea, pie con versión y página."""
+
+    def __init__(self, cfg, semana, ini, fin, tipo, paginas):
+        self.cfg, self.semana, self.ini, self.fin, self.tipo, self.total, self.pag = cfg, semana, ini, fin, tipo, paginas, 1
+        self.buf = io.BytesIO()
+        self.c = rl_canvas.Canvas(self.buf, pagesize=letter)
+        self.c.setTitle(f"Informe semanal · {cfg['proyecto']} · semana {semana}")
+
+    # ---- elementos comunes
+    def _logo(self, x, y_tope, ancho):
+        if LOGO.exists():
+            img = ImageReader(str(LOGO))
+            iw, ih = img.getSize()
+            self.c.drawImage(img, x, y_tope - ancho * ih / iw, width=ancho, height=ancho * ih / iw, mask="auto")
+
+    def _marco(self):
+        c = self.c
+        c.setFillColor(TEAL)
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(M_X, PG_H - 31, "Informe Semanal Operación y Mantenimiento")
+        c.setFont("Helvetica", 10)
+        c.drawString(M_X, PG_H - 44, self.cfg["planta"])
+        self._logo(PG_W - M_X - 135, PG_H - 16, 135)
+        c.setStrokeColor(TEAL)
+        c.setLineWidth(.75)
+        c.line(M_X, PG_H - 60, PG_W - M_X, PG_H - 60)
+        c.line(M_X, 45, PG_W - M_X, 45)
+        c.setFont("Helvetica", 9.5)
+        c.drawString(M_X + 50, 31, f"Versión {VERSION_INFORME}")
+        resto, num, pre = f" de {self.total}", str(self.pag), "Página "
+        x = PG_W - M_X - c.stringWidth(resto, "Helvetica", 9.5)
+        c.drawString(x, 31, resto)
+        c.setFont("Helvetica-Bold", 9.5)
+        x -= c.stringWidth(num, "Helvetica-Bold", 9.5)
+        c.drawString(x, 31, num)
+        c.setFont("Helvetica", 9.5)
+        c.drawString(x - c.stringWidth(pre, "Helvetica", 9.5), 31, pre)
+
+    def portada(self):
+        c = self.c
+        self._marco()
+        self._logo(M_X + 14, PG_H - 80, 135)
+        c.setFillColor(TEAL)
+        c.setFont("Helvetica-Bold", 20)
+        c.drawString(M_X + 14, PG_H - 170, "Informe Semanal de Gestión")
+        c.drawString(M_X + 14, PG_H - 196, self.cfg["proyecto"])
+        c.setFont("Helvetica", 17)
+        c.drawString(M_X + 14, PG_H - 220, f"Periodo {self.ini:%d/%m/%Y} – {self.fin:%d/%m/%Y}")
+        # patrón de triángulos verdes del formato corporativo
+        c.saveState()
+        c.setFillColor(VERDE_LOGO)
+        c.setFillAlpha(.7)
+        fila, y = 0, PG_H - 262
+        while y > 140:
+            x = M_X + 14 + (12 if fila % 2 else 0)
+            while x < PG_W - M_X:
+                p = c.beginPath()
+                p.moveTo(x - 2.4, y)
+                p.lineTo(x + 2.4, y)
+                p.lineTo(x, y + 3.6)
+                p.close()
+                c.drawPath(p, fill=1, stroke=0)
+                x += 24
+            y -= 21
+            fila += 1
+        c.restoreState()
+        # recuadro con el número de semana
+        c.setStrokeColor(TEAL)
+        c.setLineWidth(.8)
+        c.rect(M_X, 108, ANCHO, 17, fill=0, stroke=1)
+        c.setFillColor(TEAL)
+        c.rect(M_X, 108, 112, 17, fill=1, stroke=0)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 9.5)
+        c.drawString(M_X + 6, 113.5, "Número de semana")
+        c.setFillColor(TEAL)
+        c.drawString(M_X + 120, 113.5, str(self.semana))
+
+    def nueva_pagina(self):
+        self.c.showPage()
+        self.pag += 1
+        self._marco()
+        return PG_H - 90  # y inicial del contenido
+
+    # ---- bloques de contenido
+    def seccion(self, y, numero, titulo):
+        self.c.setFillColor(TEAL)
+        self.c.setFont("Helvetica-Bold", 11.5)
+        self.c.drawString(M_X, y, f"{numero}   {titulo}")
+        return y - 8
+
+    def parrafo(self, y, texto, tam=9, color="#222222"):
+        estilo = ParagraphStyle("p", fontName="Helvetica", fontSize=tam, leading=tam + 3.2, textColor=colors.HexColor(color), alignment=TA_JUSTIFY)
+        p = Paragraph(texto, estilo)
+        _, alto = p.wrapOn(self.c, ANCHO, 200)
+        p.drawOn(self.c, M_X, y - alto)
+        return y - alto - 8
+
+    def aviso(self, y, texto):
+        """Recuadro de advertencia (fondo naranjo claro)."""
+        estilo = ParagraphStyle("aviso", fontName="Helvetica-Bold", fontSize=8.5, leading=11.5, textColor=colors.HexColor("#8A4B00"))
+        p = Paragraph(texto, estilo)
+        _, alto = p.wrapOn(self.c, ANCHO - 16, 120)
+        caja = alto + 12
+        self.c.setFillColor(colors.HexColor("#FFF4E5"))
+        self.c.setStrokeColor(colors.HexColor("#FFD59A"))
+        self.c.setLineWidth(.8)
+        self.c.roundRect(M_X, y - caja, ANCHO, caja, 3, fill=1, stroke=1)
+        p.drawOn(self.c, M_X + 8, y - caja + 6)
+        return y - caja - 10
+
+    def tabla(self, y, datos, anchos, fuente=8, con_total=True):
+        n = len(datos)
+        alturas = [27] + [16] * (n - 1)
+        t = Table(datos, colWidths=anchos, rowHeights=alturas)
+        est = [("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), fuente),
+               ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#222222")), ("BACKGROUND", (0, 0), (-1, 0), TEAL),
+               ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+               ("FONTSIZE", (0, 0), (-1, 0), fuente - .5), ("ALIGN", (1, 0), (-1, -1), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+               ("LINEBELOW", (0, 1), (-1, -2), .4, colors.HexColor("#E3E7EA")), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+               ("LEFTPADDING", (0, 0), (-1, -1), 6)]
+        if con_total:
+            est += [("BACKGROUND", (0, -1), (-1, -1), TEAL), ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+                    ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold")]
+        t.setStyle(TableStyle(est))
+        _, alto = t.wrapOn(self.c, ANCHO, 400)
+        t.drawOn(self.c, M_X, y - alto)
+        return y - alto - 12
+
+    def ficha(self, y, filas):
+        """Lista de magnitudes (etiqueta a la izquierda, valor a la derecha), como en 'Magnitudes acumuladas'."""
+        t = Table(filas, colWidths=[ANCHO * .72, ANCHO * .28], rowHeights=17)
+        t.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), 9),
+                               ("FONTNAME", (1, 0), (1, -1), "Helvetica-Bold"), ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                               ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#222222")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                               ("LINEBELOW", (0, 0), (-1, -1), .4, colors.HexColor("#E3E7EA")), ("LINEABOVE", (0, 0), (-1, 0), .75, TEAL),
+                               ("LINEBELOW", (0, -1), (-1, -1), .75, TEAL)]))
+        _, alto = t.wrapOn(self.c, ANCHO, 400)
+        t.drawOn(self.c, M_X, y - alto)
+        return y - alto - 12
+
+    def grafico(self, y, figura, titulo, alto_rel=.33):
+        self.c.setFillColor(colors.HexColor("#222222"))
+        self.c.setFont("Helvetica-Bold", 9)
+        self.c.drawString(M_X, y - 8, titulo)
+        alto = ANCHO * alto_rel
+        self.c.drawImage(ImageReader(_grafico_png(figura)), M_X, y - 14 - alto, width=ANCHO, height=alto)
+        return y - 14 - alto - 14
+
+    def notas(self, y, textos):
+        for t in textos:
+            y = self.parrafo(y, t, tam=7.5, color="#5E6C84") + 4
+        return y
+
+    def cerrar(self):
+        self.c.showPage()
+        self.c.save()
+        return self.buf.getvalue()
 
 
-def crear_pdf_bess(cfg, semana, tipo, df, filas, tot, lunes, domingo, generado, precios=None):
-    """Reporte del BESS: inyección diaria con separación PPA / Spot, ingresos y CMG ponderado Spot."""
+def _nota_cmg(tipo):
+    if tipo == "Preliminar":
+        return "Los costos marginales son preliminares. Los definitivos se publican el vigésimo día de cada mes respecto del mes anterior."
+    return "Los costos marginales corresponden a valores definitivos."
+
+
+def crear_informe_solar(cfg, semana, tipo, df, ini, fin, ini_mes, budget_mes, generado):
     barra = BARRAS_CMG[cfg["id"]]
-    buf, c = _pdf_nuevo(cfg["titulo"], semana)
-    _pdf_encabezado(c, cfg["titulo"], semana, tipo, lunes, domingo)
-    total_mwh = tot["ppa"] + tot["spot"]
-    ing_total = tot["ing_ppa"] + tot["ing_spot"]
-    y_k = _pdf_kpis(c, [
-        ("Inyección total", f"{fmt(total_mwh, 1)} MWh", f"PPA {fmt(tot['ppa'], 1)}  ·  Spot {fmt(tot['spot'], 1)} MWh"),
-        ("Ingreso total", f"USD {fmt(ing_total, 0)}", f"PPA {fmt(tot['ing_ppa'], 0)}  ·  Spot {fmt(tot['ing_spot'], 0)} USD"),
-        ("CMG ponderado Spot", f"USD {fmt(ponderado_spot(tot), 2)}/MWh", None),
-        ("Carga del BESS", f"{fmt(tot['carga'], 1)} MWh", None)])
-    datos = [["Día", "PPA (MWh)", "Spot (MWh)", "Total (MWh)", "CMG Spot USD/MWh", "Ing. PPA (USD)", "Ing. Spot (USD)"]]
-    for i, f in enumerate(filas):
+    filas, tot = resumen_dias(df, cfg["col"], ini, fin)
+    validar_resumen(tot, cfg["titulo"])
+    aviso = aviso_cmg(tot, tipo)
+    filas_m, tot_m = resumen_dias(df, cfg["col"], ini_mes, fin)
+    p = InformePDF(cfg, semana, ini, fin, tipo, 3)
+    p.portada()
+
+    # Página 2: generación de la semana y del mes
+    y = p.nueva_pagina()
+    y = p.seccion(y, "1", "Generación de la semana")
+    y = p.parrafo(y, f"Datos de producción diarios del {ini:%d-%m-%Y} al {fin:%d-%m-%Y}. CMG {tipo.lower()} obtenido desde la barra {barra}.")
+    if aviso:
+        y = p.aviso(y, aviso)
+    datos = [["Fecha", "Generación\n[MWh]", "CMG 24h\n[USD/MWh]", "CMG Ponderado\n[USD/MWh]", "Ingresos SPOT\n[USD]"]]
+    for f in filas:
+        datos.append([dia_corto(f["fecha"]), fmt(f["mwh"], 0) if f["h_energia"] else "–", fmt(f["cmg24"], 1),
+                      fmt(ponderado(f), 1) if f["h_cmg"] else "–", fmt(f["ingreso"], 0) if f["h_cmg"] else "–"])
+    datos.append(["Total", fmt(tot["mwh"], 0), fmt(tot["cmg24"], 1), fmt(ponderado(tot), 1), fmt(tot["ingreso"], 0) if tot["h_cmg"] else "–"])
+    y = p.tabla(y, datos, [ANCHO * w for w in (.16, .20, .20, .22, .22)], fuente=8.5)
+
+    y = p.seccion(y - 6, "2", "Generación del mes")
+    y = p.parrafo(y, f"Acumulado de {MESES[fin.month - 1].lower()} de {fin.year} al {fin:%d-%m-%Y} ({len(filas_m)} días; "
+                     f"{sum(1 for f in filas_m if f['h_energia'])} con datos).")
+    avance = tot_m["mwh"] / budget_mes * 100 if budget_mes else None
+    y = p.ficha(y, [["Generación acumulada del mes [MWh]", fmt(tot_m["mwh"], 0)],
+                    ["Budget de generación del mes [MWh]", fmt(budget_mes, 0) if budget_mes else "Sin budget"],
+                    ["Avance respecto del budget mensual [%]", f"{fmt(avance, 1)} %" if avance is not None else "–"],
+                    ["CMG ponderado del mes [USD/MWh]", fmt(ponderado(tot_m), 1) if tot_m["h_cmg"] else "–"],
+                    ["Ingresos SPOT del mes [USD]", fmt(tot_m["ingreso"], 0) if tot_m["h_cmg"] else "–"]])
+
+    # Página 3: gráficos de energía vs costo marginal
+    y = p.nueva_pagina()
+    y = p.seccion(y, "3", "Energía y costo marginal")
+    y = p.parrafo(y, "Inyección horaria de la semana junto al costo marginal, y generación diaria del mes con el CMG de 24 horas y el CMG ponderado.")
+    y = p.grafico(y, grafico_semana_horas(df, cfg["col"], ini, fin, tipo), f"Semana: inyección horaria y CMG ({ini:%d-%m} al {fin:%d-%m})")
+    y = p.grafico(y, grafico_mes_dias(filas_m, tipo), f"Mes: generación diaria y CMG ({MESES[fin.month - 1].lower()})")
+    p.notas(y, [_nota_cmg(tipo),
+                "CMG 24h: media aritmética de los CMG horarios del día. CMG ponderado: suma(energía x CMG) / suma(energía). "
+                "Ingreso SPOT: energía de cada tramo de 15 minutos x CMG de la barra.",
+                cfg["nota"],
+                f"Horas con medida de energía en la semana: {tot['h_energia']} de {tot['h_total']}; con CMG disponible: {tot['h_cmg']}."
+                + (" Las horas sin CMG no se valorizan." if tot["h_cmg"] < tot["h_energia"] else ""),
+                f"Informe generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."])
+    return p.cerrar(), aviso
+
+
+def crear_informe_bess(cfg, semana, tipo, df, ini, fin, ini_mes, budget_bess, precios, generado):
+    barra = BARRAS_CMG[cfg["id"]]
+    filas, tot = resumen_dias_bess(df, ini, fin)
+    validar_resumen(tot, cfg["titulo"])
+    aviso = aviso_cmg(tot, tipo, bess=True)
+    filas_m, tot_m = resumen_dias_bess(df, ini_mes, fin)
+    p = InformePDF(cfg, semana, ini, fin, tipo, 3)
+    p.portada()
+
+    y = p.nueva_pagina()
+    y = p.seccion(y, "1", "Generación de la semana")
+    y = p.parrafo(y, f"Inyección diaria del BESS del {ini:%d-%m-%Y} al {fin:%d-%m-%Y}, separada en energía PPA (21:00 a 06:00) y Spot (06:00 a 21:00). "
+                     f"CMG {tipo.lower()} obtenido desde la barra {barra}.")
+    if aviso:
+        y = p.aviso(y, aviso)
+    datos = [["Fecha", "PPA\n[MWh]", "Spot\n[MWh]", "Total\n[MWh]", "CMG 24h\n[USD/MWh]", "CMG Spot Pond.\n[USD/MWh]", "Ingreso PPA\n[USD]", "Ingreso Spot\n[USD]"]]
+    for f in filas:
         ok = f["h_energia"] > 0
-        datos.append([f"{DIAS_SEMANA[i]} {f['fecha']:%d-%m-%Y}", fmt(f["ppa"], 1) if ok else "–", fmt(f["spot"], 1) if ok else "–",
-                      fmt(f["ppa"] + f["spot"], 1) if ok else "–", fmt(ponderado_spot(f), 2) if f["h_cmg"] else "–",
+        datos.append([dia_corto(f["fecha"]), fmt(f["ppa"], 1) if ok else "–", fmt(f["spot"], 1) if ok else "–",
+                      fmt(f["ppa"] + f["spot"], 1) if ok else "–", fmt(f["cmg24"], 1), fmt(ponderado_spot(f), 1) if f["h_cmg"] else "–",
                       fmt(f["ing_ppa"], 0) if ok else "–", fmt(f["ing_spot"], 0) if f["h_cmg"] else "–"])
-    datos.append(["Total semana", fmt(tot["ppa"], 1), fmt(tot["spot"], 1), fmt(total_mwh, 1), fmt(ponderado_spot(tot), 2),
-                  fmt(tot["ing_ppa"], 0), fmt(tot["ing_spot"], 0)])
-    y = _pdf_tabla(c, datos, (.195, .11, .11, .115, .185, .145, .14), y_k - 5 * mm, fuente=8.5)
+    datos.append(["Total", fmt(tot["ppa"], 1), fmt(tot["spot"], 1), fmt(tot["ppa"] + tot["spot"], 1), fmt(tot["cmg24"], 1),
+                  fmt(ponderado_spot(tot), 1), fmt(tot["ing_ppa"], 0), fmt(tot["ing_spot"], 0) if tot["h_cmg"] else "–"])
+    y = p.tabla(y, datos, [ANCHO * w for w in (.11, .10, .10, .10, .13, .16, .15, .15)], fuente=7.5)
 
-    # Gráfico 1: inyección diaria apilada, separada en PPA y Spot
-    etiquetas = [f"{DIAS_SEMANA[i][:3]} {f['fecha']:%d-%m}" for i, f in enumerate(filas)]
-    ppa, spot = [f["ppa"] for f in filas], [f["spot"] for f in filas]
-    fig, ax = plt.subplots(figsize=(10, 2.9))
-    ax.bar(etiquetas, ppa, color="#1565C0", width=.55, label="PPA (21:00 a 06:00)")
-    ax.bar(etiquetas, spot, bottom=ppa, color="#65BDEB", width=.55, label="Spot (06:00 a 21:00)")
-    ax.set_title("Inyección diaria del BESS (MWh)", loc="left", fontsize=11, color="#172B4D", fontweight="bold")
-    ax.legend(loc="upper center", bbox_to_anchor=(.5, -.1), ncol=2, frameon=False, fontsize=8)
-    _estilo_ejes(ax)
-    y = _pdf_grafico(c, fig, y, .30, 4 * mm)
+    y = p.seccion(y - 6, "2", "Generación del mes")
+    y = p.parrafo(y, f"Acumulado de {MESES[fin.month - 1].lower()} de {fin.year} al {fin:%d-%m-%Y} ({len(filas_m)} días; "
+                     f"{sum(1 for f in filas_m if f['h_energia'])} con datos).")
+    total_m = tot_m["ppa"] + tot_m["spot"]
+    bud = budget_bess.get("gen") if budget_bess else None
+    avance = total_m / bud * 100 if bud else None
+    y = p.ficha(y, [["Inyección acumulada del mes [MWh]", fmt(total_m, 1)],
+                    ["   Energía PPA [MWh]", fmt(tot_m["ppa"], 1)],
+                    ["   Energía Spot [MWh]", fmt(tot_m["spot"], 1)],
+                    ["Budget de generación del mes [MWh]", fmt(bud, 0) if bud else "Sin budget"],
+                    ["Avance respecto del budget mensual [%]", f"{fmt(avance, 1)} %" if avance is not None else "–"],
+                    ["Precio PPA del mes [USD/MWh]", fmt(precio_ppa(precios, fin.year, fin.month), 2)],
+                    ["Ingresos PPA del mes [USD]", fmt(tot_m["ing_ppa"], 0)],
+                    ["Ingresos Spot del mes [USD]", fmt(tot_m["ing_spot"], 0) if tot_m["h_cmg"] else "–"]])
 
-    # Gráfico 2: inyección horaria coloreada por tipo y CMG
-    sem = _semana_horas(df, lunes, domingo)
-    x = range(len(sem))
-    fig, ax = plt.subplots(figsize=(10, 3.2))
-    ax.bar(x, sem["Energía PPA kWh"].fillna(0) / 1000, color="#1565C0", width=.9, label="Inyección PPA (MWh)")
-    ax.bar(x, sem["Energía Spot kWh"].fillna(0) / 1000, color="#65BDEB", width=.9, label="Inyección Spot (MWh)")
-    ax2 = ax.twinx()
-    ax2.plot(x, sem["CMG USD/MWh"], color="#F05A28", linewidth=1.6, label=f"CMG {tipo} (USD/MWh)")
-    _marcas_horas(ax, sem)
-    _ejes_cmg(ax, ax2, sem)
-    ax.set_title("Inyección por hora (PPA y Spot) y CMG", loc="left", fontsize=11, color="#172B4D", fontweight="bold")
-    _leyenda_abajo(ax, ax2, 3)
-    y = _pdf_grafico(c, fig, y, .33, 3 * mm)
-
-    _pdf_notas(c, [f"PPA: energía inyectada de 21:00 a 06:00, valorizada a {texto_precios_semana(precios or {}, lunes, domingo)}. Spot: de 06:00 a 21:00, valorizada al CMG {tipo.lower()} de la barra {barra}.",
-                   f"CMG ponderado Spot = suma(energía Spot x CMG) / suma(energía Spot). {cfg['nota']}",
-                   f"Carga del BESS: horas con menos de {UMBRAL_OFFSET_CARGA_BESS_KWH} kWh se consideran offset y se cuentan como 0.",
-                   f"Horas con medida: {tot['h_energia']} de 168. Horas Spot con CMG disponible: {tot['h_cmg']} de {tot['h_spot']}." +
-                   (" Las horas sin CMG no se valorizan." if tot["h_cmg"] < tot["h_spot"] else ""),
-                   f"Reporte generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."], y)
-    return _pdf_cerrar(buf, c)
+    y = p.nueva_pagina()
+    y = p.seccion(y, "3", "Energía y costo marginal")
+    y = p.parrafo(y, "Inyección horaria de la semana (PPA y Spot) junto al costo marginal, e inyección diaria del mes con el CMG de 24 horas y el CMG ponderado Spot.")
+    y = p.grafico(y, grafico_semana_horas(df, None, ini, fin, tipo, bess=True), f"Semana: inyección horaria PPA / Spot y CMG ({ini:%d-%m} al {fin:%d-%m})")
+    y = p.grafico(y, grafico_mes_dias(filas_m, tipo, bess=True), f"Mes: inyección diaria PPA / Spot y CMG ({MESES[fin.month - 1].lower()})")
+    p.notas(y, [_nota_cmg(tipo),
+                f"PPA: energía inyectada de 21:00 a 06:00, valorizada a {texto_precios_semana(precios or {}, ini, fin)}. "
+                f"Spot: de 06:00 a 21:00, valorizada al CMG {tipo.lower()} de la barra {barra}.",
+                "CMG 24h: media aritmética de los CMG horarios del día. CMG ponderado Spot: suma(energía Spot x CMG) / suma(energía Spot). " + cfg["nota"],
+                f"Horas con medida en la semana: {tot['h_energia']} de {tot['h_total']}. Horas Spot con CMG disponible: {tot['h_cmg']} de {tot['h_spot']}."
+                + (" Las horas sin CMG no se valorizan." if tot["h_cmg"] < tot["h_spot"] else ""),
+                f"Informe generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."])
+    return p.cerrar(), aviso
 
 
-def generar_reportes_semana(semana, lunes, domingo, tipo, precios_t=()):
-    """Devuelve ({archivo.pdf: bytes}, errores, advertencias_api)."""
-    horario, adv = construir_horario(lunes.isoformat(), domingo.isoformat(), tipo, tuple(r["id"] for r in REPORTES), precios_t)
-    pdfs, errores = {}, []
+def generar_reportes_semana(fin, tipo, precios_t=(), bud_proy=None, bud_bess=None):
+    """Informes del periodo que termina en 'fin' (último día completo). Devuelve ({archivo.pdf: bytes}, errores, advertencias_api, avisos_cmg)."""
+    ini, fin, ini_mes = periodo_informe(fin)
+    semana = int(fin.isocalendar().week)
+    desde = min(ini, ini_mes)
+    horario, adv = construir_horario(desde.date().isoformat(), fin.date().isoformat(), tipo, tuple(r["id"] for r in REPORTES), precios_t)
+    pdfs, errores, avisos = {}, [], []
     for cfg in REPORTES:
         try:
             if cfg.get("kind") == "bess":
-                filas, tot = calcular_semana_bess(horario[cfg["id"]], tipo, lunes)
-                pdf = crear_pdf_bess(cfg, semana, tipo, horario[cfg["id"]], filas, tot, lunes, domingo, ahora(), dict(precios_t))
+                pdf, aviso = crear_informe_bess(cfg, semana, tipo, horario[cfg["id"]], ini, fin, ini_mes, bud_bess, dict(precios_t), ahora())
             else:
-                filas, tot = calcular_semana(horario[cfg["id"]], cfg, tipo, lunes)
-                pdf = crear_pdf_reporte(cfg, semana, tipo, horario[cfg["id"]], filas, tot, lunes, domingo, ahora())
+                pdf, aviso = crear_informe_solar(cfg, semana, tipo, horario[cfg["id"]], ini, fin, ini_mes, (bud_proy or {}).get(cfg["id"]), ahora())
             pdfs[f"Reporte_Semana{semana}_{cfg['titulo'].replace(' ', '_')}.pdf"] = pdf
+            if aviso:
+                avisos.append(f"{cfg['titulo']}: {aviso}")
         except ValueError as e:
             errores.append(str(e))
-    return pdfs, errores, adv
+    return pdfs, errores, adv, avisos
 
 
 # =========================================================
@@ -1442,47 +1608,51 @@ with tab_port:
 
 # ---------------- Reportes y descargas ----------------
 with tab_rep:
-    st.subheader("Reporte semanal (lunes a domingo)")
-    st.caption("Un PDF por proyecto (San Pedro III, Doña Carmen, María Elena PFV y BESS María Elena) con generación inyectada, CMG ponderado e ingresos. El BESS separa la energía PPA y Spot.")
-    semanas = semanas_disponibles(anio)
-    if not semanas:
-        st.info("Aún no hay semanas disponibles.")
-    else:
-        r1, r2, r3 = st.columns([2, 1, 1], vertical_alignment="bottom")
-        completas = [i for i, (_, _, vie) in enumerate(semanas) if vie <= HOY.date()]
-        sel_sem = r1.selectbox("Semana del año", range(len(semanas)), index=completas[0] if completas else 0,
-                               format_func=lambda i: f"Semana {semanas[i][0]} · {semanas[i][1]:%d-%m} al {semanas[i][2]:%d-%m}"
-                               + (" (en curso)" if semanas[i][2] > HOY.date() else ""), key="sel_semana")
-        tipo_sem = r2.selectbox("Tipo de CMG", list(TIPOS_CMG), index=1, key="tipo_cmg_semana")
-        n_sem, lunes, domingo = semanas[sel_sem]
-        clave_sel = (n_sem, anio, tipo_sem)
-        if r3.button("Generar reportes", type="primary", width="stretch", key="b_generar_reportes"):
-            with st.spinner(f"Generando reportes de la semana {n_sem}…"):
-                pdfs, errores, adv_rep = generar_reportes_semana(n_sem, lunes, domingo, tipo_sem, PRECIOS_T)
-                zip_buf = io.BytesIO()
-                if pdfs:
-                    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
-                        for nombre, datos in pdfs.items():
-                            z.writestr(nombre, datos)
-                st.session_state.reportes = {"clave": clave_sel, "pdfs": pdfs, "zip": zip_buf.getvalue(), "errores": errores, "adv": adv_rep}
-        rep = st.session_state.get("reportes")
-        if rep and rep["clave"] == clave_sel:
-            for e in rep["errores"]:
-                st.error(e)
-            if rep["pdfs"]:
-                st.success(f"Semana {n_sem}: {len(rep['pdfs'])} reporte(s) listo(s) (CMG {tipo_sem}).")
-                bcols = st.columns(len(rep["pdfs"]) + 1)
-                for col, (nombre, datos) in zip(bcols, rep["pdfs"].items()):
-                    col.download_button(f"PDF {nombre.split('_', 2)[2].replace('_', ' ')[:-4]}", datos, file_name=nombre, mime="application/pdf",
-                                        width="stretch", key=f"dl_{nombre}", on_click="ignore", icon=":material/picture_as_pdf:")
-                bcols[-1].download_button("Todos (ZIP)", rep["zip"], file_name=f"Reportes_Semana{n_sem}.zip", mime="application/zip",
-                                          width="stretch", key="dl_zip_reportes", on_click="ignore", icon=":material/folder_zip:")
-            if rep["adv"]:
-                with st.expander("Advertencias de la consulta"):
-                    for a in rep["adv"]:
-                        st.markdown(f"- {a}")
-        elif rep:
-            st.info("Cambió la selección: pulsa «Generar reportes» para actualizar los archivos.")
+    st.subheader("Informe semanal")
+    st.caption(f"Un PDF por proyecto en el formato de la empresa: generación de la semana y del mes, y gráficos de energía vs costo marginal. "
+               f"Cubre los últimos {DIAS_PERIODO} días hasta el último día completo. El BESS separa la energía PPA y Spot.")
+    ayer = HOY.date() - timedelta(days=1)
+    r1, r2, r3 = st.columns([2, 1, 1], vertical_alignment="bottom")
+    fin_sel = r1.date_input("Último día del periodo", value=ayer, min_value=date(ANIO_OPERACIONAL, 1, 1), max_value=ayer, key="fin_informe",
+                            help="Por defecto es ayer, porque el día de hoy aún no termina.")
+    tipo_sem = r2.selectbox("Tipo de CMG", list(TIPOS_CMG), index=1, key="tipo_cmg_semana")
+    ini_i, fin_i, _ = periodo_informe(fin_sel)
+    n_sem = int(fin_i.isocalendar().week)
+    st.caption(f"Periodo: {DIAS_SEMANA[ini_i.weekday()].lower()} {ini_i:%d-%m-%Y} a {DIAS_SEMANA[fin_i.weekday()].lower()} {fin_i:%d-%m-%Y} · Semana {n_sem}")
+    clave_sel = (fin_sel, tipo_sem)
+    if r3.button("Generar informes", type="primary", width="stretch", key="b_generar_reportes"):
+        with st.spinner(f"Generando informes de la semana {n_sem}…"):
+            bud_proy = {r.Proyecto: float(r.Budget_Generacion_MWh) for r in
+                        df_bud_proy[(df_bud_proy["Anio"] == fin_i.year) & (df_bud_proy["Mes"] == fin_i.month)].itertuples()}
+            bb = df_bud_bess[(df_bud_bess["Anio"] == fin_i.year) & (df_bud_bess["Mes"] == fin_i.month)]
+            bud_bess = {"gen": float(bb.iloc[0]["Budget_Generacion_MWh"]), "ppa": float(bb.iloc[0]["Budget_PPA_MWh"])} if not bb.empty else {}
+            pdfs, errores, adv_rep, avisos_rep = generar_reportes_semana(fin_i, tipo_sem, PRECIOS_T, bud_proy, bud_bess)
+            zip_buf = io.BytesIO()
+            if pdfs:
+                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
+                    for nombre, datos in pdfs.items():
+                        z.writestr(nombre, datos)
+            st.session_state.reportes = {"clave": clave_sel, "pdfs": pdfs, "zip": zip_buf.getvalue(), "errores": errores, "adv": adv_rep, "avisos": avisos_rep}
+    rep = st.session_state.get("reportes")
+    if rep and rep["clave"] == clave_sel:
+        for e in rep["errores"]:
+            st.error(e)
+        if rep["pdfs"]:
+            st.success(f"Semana {n_sem}: {len(rep['pdfs'])} informe(s) listo(s) (CMG {tipo_sem}).")
+            for aviso_ in rep["avisos"]:
+                st.warning(aviso_, icon=":material/warning:")
+            bcols = st.columns(len(rep["pdfs"]) + 1)
+            for col, (nombre, datos) in zip(bcols, rep["pdfs"].items()):
+                col.download_button(f"PDF {nombre.split('_', 2)[2].replace('_', ' ')[:-4]}", datos, file_name=nombre, mime="application/pdf",
+                                    width="stretch", key=f"dl_{nombre}", on_click="ignore", icon=":material/picture_as_pdf:")
+            bcols[-1].download_button("Todos (ZIP)", rep["zip"], file_name=f"Reportes_Semana{n_sem}.zip", mime="application/zip",
+                                      width="stretch", key="dl_zip_reportes", on_click="ignore", icon=":material/folder_zip:")
+        if rep["adv"]:
+            with st.expander("Advertencias de la consulta"):
+                for a_ in rep["adv"]:
+                    st.markdown(f"- {a_}")
+    elif rep:
+        st.info("Cambió la selección: pulsa «Generar informes» para actualizar los archivos.")
 
     st.divider()
     st.subheader("Consolidados Excel")
