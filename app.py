@@ -1072,9 +1072,10 @@ class InformePDF:
         c = self.c
         c.setFillColor(TEAL)
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(M_X, PG_H - 31, "Informe Semanal Operación y Mantenimiento")
+        c.drawString(M_X, PG_H - 31, self.cfg.get("cabecera", "Informe Semanal Operación y Mantenimiento"))
         c.setFont("Helvetica", 10)
-        c.drawString(M_X, PG_H - 44, self.cfg["planta"])
+        if self.cfg["planta"]:
+            c.drawString(M_X, PG_H - 44, self.cfg["planta"])
         self._logo(PG_W - M_X - 135, PG_H - 16, 135)
         c.setStrokeColor(TEAL)
         c.setLineWidth(.75)
@@ -1097,10 +1098,13 @@ class InformePDF:
         self._logo(M_X + 14, PG_H - 80, 135)
         c.setFillColor(TEAL)
         c.setFont("Helvetica-Bold", 20)
-        c.drawString(M_X + 14, PG_H - 170, "Informe Semanal de Gestión")
-        c.drawString(M_X + 14, PG_H - 196, self.cfg["proyecto"])
+        c.drawString(M_X + 14, PG_H - 170, self.cfg.get("titulo_portada", "Informe Semanal de Gestión"))
+        y_p = PG_H - 196
+        if self.cfg["proyecto"]:
+            c.drawString(M_X + 14, y_p, self.cfg["proyecto"])
+            y_p -= 24
         c.setFont("Helvetica", 17)
-        c.drawString(M_X + 14, PG_H - 220, f"Periodo {self.ini:%d/%m/%Y} – {self.fin:%d/%m/%Y}")
+        c.drawString(M_X + 14, y_p, f"Periodo {self.ini:%d/%m/%Y} – {self.fin:%d/%m/%Y}")
         # patrón de triángulos verdes del formato corporativo
         c.saveState()
         c.setFillColor(VERDE_LOGO)
@@ -1555,13 +1559,6 @@ def _seccion_pv(p, y, num, n, d, semana, ini, fin, ini_mes, fin_mes, series, bud
     mes = [f"Mes al {fin:%d-%m}", fmt(m["real_mes"], 1), fmt(m["bud_acum"], 1), fmt(m["cump_acum"], 1)]
     comp = [f"Mes completo ({MESES[fin.month - 1].lower()})", fmt(m["real_mes"], 1), fmt(m["bud_mes"], 1), fmt(m["avance"], 1)]
     anchos = (.38, .17, .17, .28)
-    if con_precio:
-        cab += ["CMG pond.\n[USD/MWh]", "Ingreso Spot\n[USD]"]
-        ts, tm = d["ts"], d["tm"]
-        sem += [fmt(ponderado(ts), 1) if ts["h_cmg"] else "–", fmt(ts["ingreso"], 0) if ts["h_cmg"] else "–"]
-        mes += [fmt(ponderado(tm), 1) if tm["h_cmg"] else "–", fmt(tm["ingreso"], 0) if tm["h_cmg"] else "–"]
-        comp += ["", ""]
-        anchos = (.29, .12, .12, .16, .15, .16)
     filas = [{"celdas": sem, "cumpl": m["cump_sem"]}, {"celdas": mes, "cumpl": m["cump_acum"]}, {"celdas": comp, "cumpl": None}]
     y = _tabla_periodos(p, y, cab, filas, anchos, 3)
     alto = ANCHO * .33
@@ -1572,7 +1569,7 @@ def _seccion_pv(p, y, num, n, d, semana, ini, fin, ini_mes, fin_mes, series, bud
 
 
 def _seccion_bess(p, y, num, d, semana, ini, fin, ini_mes, fin_mes, series, budgets):
-    mb, bs, bm = d["m"], d["bs"], d["bm"]
+    mb = d["m"]
     y = p.titulo_proyecto(y, num, NOMBRES_CORP["MARIA ELENA BESS"])
     if d.get("aviso"):
         y = p.aviso(y, d["aviso"])
@@ -1590,11 +1587,6 @@ def _seccion_bess(p, y, num, d, semana, ini, fin, ini_mes, fin_mes, series, budg
                          fmt(t["bud_acum"], 1), fmt(t["cump_acum"], 1)], "cumpl": t["cump_acum"]},
              {"celdas": [mes_c, "", "", fmt(t["real_mes"], 1), "", fmt(t["bud_mes"], 1), fmt(t["avance"], 1)], "cumpl": None}]
     y = _tabla_periodos(p, y, cab, filas, (.27, .10, .10, .11, .10, .11, .21), 6)
-    cab2 = ["Valorización", "Ingreso PPA\n[USD]", "Ingreso Spot\n[USD]", "Total\n[USD]", "CMG pond. Spot\n[USD/MWh]"]
-    def fila_v(etq, b):
-        sp_ = b["ing_spot"] if b["h_cmg"] else None
-        return {"celdas": [etq, fmt(b["ing_ppa"], 0), fmt(sp_, 0), fmt(b["ing_ppa"] + (sp_ or 0), 0), fmt(ponderado_spot(b), 1) if b["h_cmg"] else "–"], "cumpl": None}
-    y = _tabla_periodos(p, y, cab2, [fila_v(_etq_semana(semana, ini, fin), bs), fila_v(f"Mes al {fin:%d-%m}", bm)], (.31, .17, .17, .15, .20), 0)
     alto = ANCHO * .30
     y = p.figura(y, grafico_acumulado(series["MARIA ELENA BESS"], budgets["MARIA ELENA BESS"], ini, fin, ini_mes, fin_mes, semana),
                  "Inyección acumulada vs budget acumulado", alto)
@@ -1603,7 +1595,7 @@ def _seccion_bess(p, y, num, d, semana, ini, fin, ini_mes, fin_mes, series, budg
 
 
 def _armar_informe_corporativo(total_paginas, semana, tipo, ini, fin, ini_mes, fin_mes, datos, series, budgets, generado):
-    cfg = {"planta": "Portafolio de generación Chile", "proyecto": "Portafolio de generación · corporativo"}
+    cfg = {"planta": "", "proyecto": "", "cabecera": "Informe semanal de generación", "titulo_portada": "Informe semanal de generación"}
     p = InformeCorporativo(cfg, semana, ini, fin, tipo, total_paginas)
     p.portada()
     y = p.nueva_pagina()
@@ -1616,7 +1608,7 @@ def _armar_informe_corporativo(total_paginas, semana, tipo, ini, fin, ini_mes, f
         y = p.nueva_pagina() if primero else p.pagina_si_falta(y - 14, 300)
         primero = False
         y = _seccion_pv(p, y, num, n, datos[n], semana, ini, fin, ini_mes, fin_mes, series, budgets, False)
-    p.notas(y, [f"CMG {tipo.lower()}. Valorización de los PMGD pendiente. Informe generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."])
+    p.notas(y, [f"CMG {tipo.lower()}. Informe generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."])
     return p.cerrar(), p.pag
 
 
@@ -1660,12 +1652,7 @@ def generar_informe_corporativo(fin, tipo, precios_t, df_bud_proy, df_bud_bess):
     m_c = {"real_sem": carga[ini:fin].sum(), "real_mes": carga[ini_mes:fin].sum()}
     m_b = {"ppa": metricas(ppa, b_ppa, ini, fin, ini_mes, fin_mes), "spot": metricas(spot, b_gen - b_ppa, ini, fin, ini_mes, fin_mes),
            "total": metricas(total_b, b_gen, ini, fin, ini_mes, fin_mes), "carga": m_c}
-    _, bs = resumen_dias_bess(hb, ini, fin)
-    _, bm = resumen_dias_bess(hb, ini_mes, fin)
-    a = aviso_cmg(bs, tipo, bess=True)
-    if a:
-        avisos.append(f"BESS María Elena: {a}")
-    datos["MARIA ELENA BESS"] = {"m": m_b, "bs": bs, "bm": bm, "ppa": ppa, "spot": spot, "carga": carga, "aviso": a}
+    datos["MARIA ELENA BESS"] = {"m": m_b, "ppa": ppa, "spot": spot, "carga": carga, "aviso": None}
 
     args = (semana, tipo, ini, fin, ini_mes, fin_mes, datos, series, budgets, ahora())
     pdf, paginas = _armar_informe_corporativo(9, *args)
