@@ -1457,41 +1457,20 @@ def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana):
     dias = pd.date_range(ini_mes, fin_mes, freq="D")
     x = list(range(1, len(dias) + 1))
     bud_ac = bud.reindex(dias).fillna(0).cumsum()
-    r = real.reindex(dias).where(dias <= fin).fillna(0).cumsum().where(dias <= fin)
+    r0 = real.reindex(dias).where(dias <= fin)
+    ultimo = r0.last_valid_index()  # último día con datos: el real no se extiende más allá
+    r = r0.fillna(0).cumsum().where(dias <= (ultimo if ultimo is not None else dias[0] - pd.Timedelta(days=1)))
+    ref = ultimo if ultimo is not None else fin
     fig, ax = plt.subplots(figsize=(7.4, 2.7))
     _base_mes(ax, len(x), ini, fin, ini_mes, semana)
     ax.plot(x, bud_ac.to_numpy(), color=C_BUDGET_AC, linewidth=1.8, marker="o", markersize=3.6, markerfacecolor="white", label="Budget acumulado")
     ax.plot(x, r.to_numpy(), color=C_REAL_AC, linewidth=1.8, marker="o", markersize=3.4, label="Real acumulado")
     ax.set_ylim(bottom=0)
-    ax.annotate(fmt(r.loc[fin], 0), (fin.day, r.loc[fin]), xytext=(0, -13), textcoords="offset points", ha="center", fontsize=8, color=C_REAL_AC, fontweight="bold")
-    ax.annotate(fmt(bud_ac.loc[fin], 0), (fin.day, bud_ac.loc[fin]), xytext=(0, 7), textcoords="offset points", ha="center", fontsize=8, color=C_BUDGET_AC, fontweight="bold")
+    if ultimo is not None:
+        ax.annotate(fmt(r.loc[ref], 0), (ref.day, r.loc[ref]), xytext=(0, -13), textcoords="offset points", ha="center", fontsize=8, color=C_REAL_AC, fontweight="bold")
+        ax.annotate(fmt(bud_ac.loc[ref], 0), (ref.day, bud_ac.loc[ref]), xytext=(0, 7), textcoords="offset points", ha="center", fontsize=8, color=C_BUDGET_AC, fontweight="bold")
     _leyenda_abajo(ax, 2)
     fig.subplots_adjust(left=.085, right=.985, top=.855, bottom=.25)
-    return fig
-
-
-def grafico_diario_cmg(filas_m, ini, fin, ini_mes, fin_mes, semana):
-    """Generación diaria (barras) y CMG ponderado diario (línea), mes completo."""
-    n = fin_mes.day
-    mwh = {f["fecha"].day: f["mwh"] for f in filas_m if f["h_energia"]}
-    pond = {f["fecha"].day: ponderado(f) for f in filas_m if f["h_cmg"]}
-    fig, ax = plt.subplots(figsize=(7.4, 2.7))
-    _base_mes(ax, n, ini, fin, ini_mes, semana)
-    ax.bar(list(mwh), list(mwh.values()), color="#006072", width=.65, label="Generación (MWh)", zorder=2)
-    ax.set_ylim(bottom=0)
-    ax2 = ax.twinx()
-    if pond:
-        ax2.plot(list(pond), list(pond.values()), color=C_CMGP, linewidth=1.6, marker="o", markersize=3.6, label="CMG ponderado (USD/MWh)", zorder=3)
-        ax2.set_ylim(bottom=min(0, min(pond.values())))
-    else:
-        ax2.set_ylim(0, 50)
-        ax.text(.5, .88, "Sin CMG disponible: registros del CEN no actualizados", transform=ax.transAxes, ha="center", fontsize=8.5, color="#8A4B00",
-                bbox=dict(facecolor="white", edgecolor="none", alpha=.9))
-    ax2.set_ylabel("USD/MWh", fontsize=8, color="#5E6C84")
-    ax2.tick_params(labelsize=8, colors="#5E6C84", length=2)
-    ax2.spines[["top"]].set_visible(False)
-    _leyenda_abajo(ax, 2, ax2)
-    fig.subplots_adjust(left=.085, right=.925, top=.855, bottom=.25)
     return fig
 
 
@@ -1553,7 +1532,8 @@ def _seccion_pv(p, y, num, n, d, semana, ini, fin, ini_mes, fin_mes, series, bud
     if d.get("aviso"):
         y = p.aviso(y, d["aviso"])
     if m["sin_dato"]:
-        y = p.aviso(y, f"{m['sin_dato']} día(s) del mes sin medida en la API.")
+        k = m["sin_dato"]
+        y = p.aviso(y, f"{k} {'día' if k == 1 else 'días'} del mes sin medidas en datos del coordinador")
     cab = ["Periodo", "Real\n[MWh]", "Budget\n[MWh]", "Cumplimiento\n[%]"]
     sem = [_etq_semana(semana, ini, fin), fmt(m["real_sem"], 1), fmt(m["bud_sem"], 1), fmt(m["cump_sem"], 1)]
     mes = [f"Mes al {fin:%d-%m}", fmt(m["real_mes"], 1), fmt(m["bud_acum"], 1), fmt(m["cump_acum"], 1)]
@@ -1563,8 +1543,6 @@ def _seccion_pv(p, y, num, n, d, semana, ini, fin, ini_mes, fin_mes, series, bud
     y = _tabla_periodos(p, y, cab, filas, anchos, 3)
     alto = ANCHO * .33
     y = p.figura(y, grafico_acumulado(series[n], budgets[n], ini, fin, ini_mes, fin_mes, semana), "Producción acumulada vs budget acumulado", alto)
-    if con_precio:
-        y = p.figura(y, grafico_diario_cmg(d["filas_m"], ini, fin, ini_mes, fin_mes, semana), "Generación diaria y CMG ponderado", alto)
     return y
 
 
@@ -1608,7 +1586,7 @@ def _armar_informe_corporativo(total_paginas, semana, tipo, ini, fin, ini_mes, f
         y = p.nueva_pagina() if primero else p.pagina_si_falta(y - 14, 300)
         primero = False
         y = _seccion_pv(p, y, num, n, datos[n], semana, ini, fin, ini_mes, fin_mes, series, budgets, False)
-    p.notas(y, [f"CMG {tipo.lower()}. Informe generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."])
+    p.notas(y, [f"Informe generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."])
     return p.cerrar(), p.pag
 
 
@@ -1634,15 +1612,6 @@ def generar_informe_corporativo(fin, tipo, precios_t, df_bud_proy, df_bud_bess):
     for n in PLANTAS_FV:
         budgets[n] = budget_diario(df_bud_proy[df_bud_proy["Proyecto"] == n], dias)
         datos[n] = {"m": metricas(series[n], budgets[n], ini, fin, ini_mes, fin_mes)}
-    for n in ("MARIA ELENA PFV", "SAN PEDRO III", "DOÑA CARMEN"):
-        col = COL_PFV_REPORTE if n == "MARIA ELENA PFV" else "Inyección kWh"
-        _, ts = resumen_dias(horario[n], col, ini, fin)
-        filas_m, tm = resumen_dias(horario[n], col, ini_mes, fin)
-        a = aviso_cmg(ts, tipo)
-        datos[n].update({"ts": ts, "tm": tm, "filas_m": filas_m, "aviso": a})
-        if a:
-            avisos.append(f"{NOMBRES_CORP[n]}: {a}")
-
     # BESS
     hb = horario["BESS MARIA ELENA"]
     ppa, spot, carga = (_dia_de(hb, c, dias) for c in ("Energía PPA kWh", "Energía Spot kWh", "Carga BESS kWh"))
@@ -2024,8 +1993,8 @@ with tab_rep:
     st.divider()
     st.subheader("Informe corporativo semanal")
     st.caption("Un solo PDF con una sección por proyecto (BESS María Elena, María Elena PFV, San Pedro III, Doña Carmen y los 7 PMGD): "
-               "avance de la semana y del mes frente al budget, gráficos del mes y valorización (sin PMGD). "
-               "Usa el periodo y el tipo de CMG elegidos arriba.")
+               "avance de la semana y del mes frente al budget, con su gráfico acumulado. "
+               "Usa el periodo elegido arriba.")
     if st.button("Generar informe corporativo", type="primary", key="b_generar_corp"):
         with st.spinner(f"Generando el informe corporativo de la semana {n_sem}… (puede tardar uno o dos minutos)"):
             pdf_c, err_c, adv_c, avisos_c = generar_informe_corporativo(fin_i, tipo_sem, PRECIOS_T, df_bud_proy, df_bud_bess)
