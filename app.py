@@ -24,6 +24,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import requests  # noqa: E402
@@ -71,7 +72,9 @@ COL_PFV_REPORTE = "PFV sin BESS kWh"
 TTL_DATOS = 6 * 3600          # los datos de API se refrescan como máximo cada 6 h (o con el botón Actualizar)
 TTL_MES_CERRADO = 24 * 3600   # meses anteriores al actual cambian poco
 TTL_ERROR = 300               # una consulta fallida se reintenta a los 5 min
-MAX_HILOS = 6                 # consultas simultáneas a la API
+MAX_HILOS = 6                 # consultas simultáneas a la API de medidas (PRMTE)
+PAUSA_CMG_SEGUNDOS = 5        # pausa mínima entre consultas de CMG: se hacen de una en una para no saturar la API del CEN
+PAUSA_PAGINAS_CMG = 1         # pausa entre páginas de una misma consulta de CMG
 SEGUNDOS_ROTACION_GRAFICOS = 10
 DIAS_CARRUSEL = 30
 
@@ -248,7 +251,7 @@ PERIODOS_CARRUSEL = periodos_de_rango(CARRUSEL_INI, CARRUSEL_FIN)
 # =========================================================
 @st.cache_resource
 def _almacen():
-    return {"lock": threading.Lock(), "datos": {}, "ultima": None}
+    return {"lock": threading.Lock(), "datos": {}, "ultima": None, "cmg_lock": threading.Lock(), "cmg_ultima": 0.0}
 
 
 ALM = _almacen()
@@ -353,6 +356,7 @@ def _pedir_cmg(periodo, barra, tipo, intentos=3):
                 break
             registros.extend(datos)
             pagina += 1
+            time.sleep(PAUSA_PAGINAS_CMG)
         if registros:
             df = pd.DataFrame(registros)
             if {"fecha", "hra", "min", "cmg_usd_mwh_"}.issubset(df.columns):
@@ -366,12 +370,24 @@ def _pedir_cmg(periodo, barra, tipo, intentos=3):
         elif error is None:
             error = "sin registros"
         if intento < intentos - 1:
-            time.sleep(3 * (intento + 1))
+            time.sleep(max(PAUSA_CMG_SEGUNDOS, 3 * (intento + 1)))
     return None, f"{error} (tras {intentos} intentos)"
 
 
+def _pedir_cmg_espaciado(periodo, barra, tipo):
+    """Una consulta de CMG a la vez, con al menos PAUSA_CMG_SEGUNDOS entre el término de una y el inicio de la siguiente."""
+    with ALM["cmg_lock"]:
+        espera = PAUSA_CMG_SEGUNDOS - (time.time() - ALM["cmg_ultima"])
+        if espera > 0:
+            time.sleep(espera)
+        try:
+            return _pedir_cmg(periodo, barra, tipo)
+        finally:
+            ALM["cmg_ultima"] = time.time()
+
+
 def cmg(periodo, barra, tipo):
-    return _con_cache(("cmg", periodo, barra, tipo), _ttl_periodo(periodo), lambda: _pedir_cmg(periodo, barra, tipo))
+    return _con_cache(("cmg", periodo, barra, tipo), _ttl_periodo(periodo), lambda: _pedir_cmg_espaciado(periodo, barra, tipo))
 
 
 def lote(funcion, items):
@@ -477,6 +493,7 @@ def cargar_mensuales_api(pend_proyectos, pend_bess, precios_t=()):
     adv, precios = [], dict(precios_t)
     items = {(per, c["mpid"], c["canal"]) for proy, per in pend_proyectos for c in PROYECTOS[proy]}
     items |= {(per, m, 3) for per in pend_bess for m in BESS_MPIDS}
+    items |= {(per, m, 1) for per in pend_bess for m in BESS_MPIDS}  # carga del BESS (canal 1)
     brutos = lote(prmte, items)
     cmgs = lote(cmg, [(per, BARRA_CMG_BESS, TIPO_CMG_DASHBOARD) for per in pend_bess])
 
@@ -504,6 +521,14 @@ def cargar_mensuales_api(pend_proyectos, pend_bess, precios_t=()):
         d = d.rename(columns={"Dia": "Fecha_Dia", "PPA": "Energia_PPA_MWh", "SPOT": "Energia_Spot_MWh"})
         d["Energia_Total_MWh"] = d["Energia_PPA_MWh"] + d["Energia_Spot_MWh"]
         d["Anio"], d["Mes"] = d["Fecha_Dia"].dt.year, d["Fecha_Dia"].dt.month
+        # Carga diaria del BESS (canal 1): suma horaria, con la misma regla de offset que el horario
+        car, car_ok = serie_15m(brutos, [{"mpid": m, "canal": 1} for m in BESS_MPIDS], [per], 1, "kWh", "BESS (carga)", adv)
+        d["Carga_MWh"] = np.nan
+        if car_ok and not car.empty:
+            ch = car.assign(Hora=car["Fecha"].dt.floor("h")).groupby("Hora")["kWh"].sum().abs()
+            ch[ch < UMBRAL_OFFSET_CARGA_BESS_KWH] = 0
+            cd = (ch.groupby(ch.index.normalize()).sum() / 1000)
+            d["Carga_MWh"] = d["Fecha_Dia"].map(cd)
         diarios.append(d)
 
         df_cmg, err = cmgs[(per, BARRA_CMG_BESS, TIPO_CMG_DASHBOARD)]
@@ -526,7 +551,7 @@ def cargar_mensuales_api(pend_proyectos, pend_bess, precios_t=()):
     cols_p = ["Anio", "Mes", "Proyecto", "Generacion_MWh", "Fuente"]
     cols_b = ["Anio", "Mes", "Energia_PPA_MWh", "Energia_Spot_MWh", "Energia_Total_MWh", "Ingreso_PPA_USD", "Ingreso_Spot_USD",
               "Ingreso_Total_USD", "Fuente"]
-    cols_d = ["Fecha_Dia", "Energia_PPA_MWh", "Energia_Spot_MWh", "Energia_Total_MWh", "Anio", "Mes"]
+    cols_d = ["Fecha_Dia", "Energia_PPA_MWh", "Energia_Spot_MWh", "Energia_Total_MWh", "Carga_MWh", "Anio", "Mes"]
     return (pd.DataFrame(filas_p, columns=cols_p), pd.DataFrame(mensual_b, columns=cols_b),
             pd.concat(diarios, ignore_index=True)[cols_d] if diarios else pd.DataFrame(columns=cols_d), sorted(set(adv)))
 
@@ -1550,15 +1575,23 @@ with tab_bess:
         ad, md = st.selectbox("Mes para gráfico diario", opciones, format_func=lambda x: f"{MESES[x[1] - 1]} {x[0]}", key="mes_diario_bess")
         primero, ultimo = pd.Timestamp(ad, md, 1), min(pd.Timestamp(ad, md, calendar.monthrange(ad, md)[1]), HOY)
         dm = api_bess_diario[(api_bess_diario["Anio"] == ad) & (api_bess_diario["Mes"] == md)]
+        if "Carga_MWh" not in dm.columns:
+            dm = dm.assign(Carga_MWh=np.nan)
         dm = pd.DataFrame({"Fecha_Dia": pd.date_range(primero, ultimo, freq="D")}).merge(
-            dm[["Fecha_Dia", "Energia_PPA_MWh", "Energia_Spot_MWh"]], on="Fecha_Dia", how="left").fillna(0)
+            dm[["Fecha_Dia", "Energia_PPA_MWh", "Energia_Spot_MWh", "Carga_MWh"]], on="Fecha_Dia", how="left")
+        dm[["Energia_PPA_MWh", "Energia_Spot_MWh"]] = dm[["Energia_PPA_MWh", "Energia_Spot_MWh"]].fillna(0)
         fig = go.Figure()
         fig.add_bar(x=dm["Fecha_Dia"], y=dm["Energia_PPA_MWh"], name="PPA real", marker_color=COLOR_PRIMARIO, width=.4 * 864e5)
         fig.add_bar(x=dm["Fecha_Dia"], y=dm["Energia_Spot_MWh"], name="Spot real", marker_color=COLOR_SECUNDARIO, width=.4 * 864e5)
+        fig.add_scatter(x=dm["Fecha_Dia"], y=dm["Carga_MWh"], name="Carga BESS", mode="lines+markers", connectgaps=False,
+                        line=dict(color=COLOR_BUDGET_PROYECTO, width=3), marker=dict(size=6),
+                        hovertemplate="%{x|%d-%m}: %{y:,.1f} MWh<extra>Carga BESS</extra>")
         fig.update_layout(title=f"Inyección diaria BESS · {MESES[md - 1]} {ad}", barmode="stack", xaxis_title="Día del mes", yaxis_title="Energía [MWh]")
         fig.update_xaxes(dtick=864e5, tickformat="%d", range=[primero - pd.Timedelta(hours=12), ultimo + pd.Timedelta(hours=12)])
         fig.update_yaxes(rangemode="tozero")
         mostrar(estilo(fig, 520, leyenda_abajo=True), "g_bess_diario")
+        st.caption("Versión del gráfico: barras PPA/Spot + línea de carga BESS (canal 1) · "
+                   + ("carga disponible" if dm["Carga_MWh"].notna().any() else "sin datos de carga en la API para este mes"))
 
     cb = pd.DataFrame({"Mes": range(1, 13)}).merge(bess_anio, on="Mes", how="left").merge(
         bud_bess_anio[["Mes", "Budget_Generacion_MWh", "Budget_PPA_MWh"]], on="Mes", how="left")
@@ -1638,7 +1671,7 @@ with tab_rep:
     st.caption(f"Periodo: {DIAS_SEMANA[ini_i.weekday()].lower()} {ini_i:%d-%m-%Y} a {DIAS_SEMANA[fin_i.weekday()].lower()} {fin_i:%d-%m-%Y} · Semana {n_sem}")
     clave_sel = (fin_sel, tipo_sem)
     if r3.button("Generar informes", type="primary", width="stretch", key="b_generar_reportes"):
-        with st.spinner(f"Generando informes de la semana {n_sem}…"):
+        with st.spinner(f"Generando informes de la semana {n_sem}… (las consultas de CMG se espacian {PAUSA_CMG_SEGUNDOS} segundos; puede tardar uno o dos minutos)"):
             bud_proy = {r.Proyecto: float(r.Budget_Generacion_MWh) for r in
                         df_bud_proy[(df_bud_proy["Anio"] == fin_i.year) & (df_bud_proy["Mes"] == fin_i.month)].itertuples()}
             bb = df_bud_bess[(df_bud_bess["Anio"] == fin_i.year) & (df_bud_bess["Mes"] == fin_i.month)]
