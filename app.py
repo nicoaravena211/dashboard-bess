@@ -1427,10 +1427,11 @@ def _base_mes(ax, n, ini, fin, ini_mes, semana, ylabel="MWh"):
     ax.text((d0 + d1) / 2, 1.075, f"Semana del reporte (semana {semana})", transform=ax.get_xaxis_transform(), ha="center", va="bottom",
             fontsize=8, color="#1B6B2A", fontweight="bold")
     ax.set_xlim(.5, n + .5)
-    ax.set_xticks([1] + list(range(5, n + 1, 5)) + ([n] if n % 5 else []))
+    ax.set_xticks(list(range(1, n + 1)))  # todos los días del mes
     ax.set_xlabel("Día del mes", fontsize=8, color="#5E6C84")
     ax.set_ylabel(ylabel, fontsize=8, color="#5E6C84")
     ax.tick_params(labelsize=8, colors="#5E6C84", length=2)
+    ax.tick_params(axis="x", labelsize=6.3)
     for lado in ("top", "right"):
         ax.spines[lado].set_visible(False)
     for lado in ("left", "bottom"):
@@ -1576,20 +1577,25 @@ def _seccion_bess(p, y, num, d, semana, ini, fin, ini_mes, fin_mes, series, budg
     if d.get("aviso"):
         y = p.aviso(y, d["aviso"])
     t, pp, sp, ca = mb["total"], mb["ppa"], mb["spot"], mb["carga"]
-    cab = ["Periodo", "PPA\n[MWh]", "Spot\n[MWh]", "Total\n[MWh]", "Carga\n[MWh]", "Budget\n[MWh]", "Cumplimiento\n[%]"]
+    mes_c = f"Mes completo ({MESES[fin.month - 1].lower()})"
+    cab_p = ["Energía PPA", "Real\n[MWh]", "Budget\n[MWh]", "Cumplimiento\n[%]"]
+    filas_p = [{"celdas": [_etq_semana(semana, ini, fin), fmt(pp["real_sem"], 1), fmt(pp["bud_sem"], 1), fmt(pp["cump_sem"], 1)], "cumpl": pp["cump_sem"]},
+               {"celdas": [f"Mes al {fin:%d-%m}", fmt(pp["real_mes"], 1), fmt(pp["bud_acum"], 1), fmt(pp["cump_acum"], 1)], "cumpl": pp["cump_acum"]},
+               {"celdas": [mes_c, fmt(pp["real_mes"], 1), fmt(pp["bud_mes"], 1), fmt(pp["avance"], 1)], "cumpl": None}]
+    y = _tabla_periodos(p, y, cab_p, filas_p, (.38, .17, .17, .28), 3)
+    cab = ["Inyección total", "PPA\n[MWh]", "Spot\n[MWh]", "Total\n[MWh]", "Carga\n[MWh]", "Budget\n[MWh]", "Cumplimiento\n[%]"]
     filas = [{"celdas": [_etq_semana(semana, ini, fin), fmt(pp["real_sem"], 1), fmt(sp["real_sem"], 1), fmt(t["real_sem"], 1), fmt(ca["real_sem"], 1),
                          fmt(t["bud_sem"], 1), fmt(t["cump_sem"], 1)], "cumpl": t["cump_sem"]},
              {"celdas": [f"Mes al {fin:%d-%m}", fmt(pp["real_mes"], 1), fmt(sp["real_mes"], 1), fmt(t["real_mes"], 1), fmt(ca["real_mes"], 1),
                          fmt(t["bud_acum"], 1), fmt(t["cump_acum"], 1)], "cumpl": t["cump_acum"]},
-             {"celdas": [f"Mes completo ({MESES[fin.month - 1].lower()})", "", "", fmt(t["real_mes"], 1), "", fmt(t["bud_mes"], 1), fmt(t["avance"], 1)],
-              "cumpl": None}]
+             {"celdas": [mes_c, "", "", fmt(t["real_mes"], 1), "", fmt(t["bud_mes"], 1), fmt(t["avance"], 1)], "cumpl": None}]
     y = _tabla_periodos(p, y, cab, filas, (.27, .10, .10, .11, .10, .11, .21), 6)
     cab2 = ["Valorización", "Ingreso PPA\n[USD]", "Ingreso Spot\n[USD]", "Total\n[USD]", "CMG pond. Spot\n[USD/MWh]"]
     def fila_v(etq, b):
         sp_ = b["ing_spot"] if b["h_cmg"] else None
         return {"celdas": [etq, fmt(b["ing_ppa"], 0), fmt(sp_, 0), fmt(b["ing_ppa"] + (sp_ or 0), 0), fmt(ponderado_spot(b), 1) if b["h_cmg"] else "–"], "cumpl": None}
     y = _tabla_periodos(p, y, cab2, [fila_v(_etq_semana(semana, ini, fin), bs), fila_v(f"Mes al {fin:%d-%m}", bm)], (.31, .17, .17, .15, .20), 0)
-    alto = ANCHO * .33
+    alto = ANCHO * .30
     y = p.figura(y, grafico_acumulado(series["MARIA ELENA BESS"], budgets["MARIA ELENA BESS"], ini, fin, ini_mes, fin_mes, semana),
                  "Inyección acumulada vs budget acumulado", alto)
     y = p.figura(y, grafico_bess_diario(d["ppa"], d["spot"], d["carga"], ini, fin, ini_mes, fin_mes, semana), "Inyección diaria PPA / Spot y carga del BESS", alto)
