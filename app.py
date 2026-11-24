@@ -1356,7 +1356,7 @@ def generar_reportes_semana(fin, tipo, precios_t=(), bud_proy=None, bud_bess=Non
 import re  # noqa: E402
 HOJAS_MES = ("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
 ARCHIVO_CURTAILMENT = RAIZ / "curtailment_diario.csv"  # base opcional en el repositorio (la deja el propio dashboard para descargar)
-COLS_CURT = ["Proyecto", "Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes", "Inversores_MWh"]
+COLS_CURT = ["Proyecto", "Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes", "Inversores_MWh", "Curtailment_Esperado_MWh"]
 # Potencia nominal [MWp] para la generación esperada (recurso × potencia). María Elena y Doña Carmen: hoja «Constantes»; San Pedro: III + VI.
 POTENCIA_MWP = {"MARIA ELENA PFV": 72.8, "DOÑA CARMEN": 40.0, "SAN PEDRO III": 33.672 + 23.855}
 _NS_XL = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -1404,7 +1404,9 @@ def _celdas_hoja(z, ruta, textos):
     for _, el in ET.iterparse(z.open(ruta), events=("end",)):
         if el.tag == _NS_XL + "c":
             v = el.find(_NS_XL + "v")
-            if v is not None and v.text is not None:
+            if el.get("t") == "inlineStr":  # texto escrito directamente en la celda (otros programas distintos de Excel)
+                celdas[_separa_ref(el.get("r"))] = "".join(t.text or "" for t in el.iter(_NS_XL + "t"))
+            elif v is not None and v.text is not None:
                 tipo = el.get("t")
                 if tipo == "s":
                     celdas[_separa_ref(el.get("r"))] = textos[int(v.text)]
@@ -1448,13 +1450,17 @@ def leer_curtailment_informe(contenido, nombre_archivo=""):
         if proyecto is None:
             proyecto = _proyecto_del_informe(str(c.get((3, 3), "")), nombre_archivo)
         # Encabezado "Curtailments" de la tabla diaria: fila 15-30, columna I en adelante (el resumen superior está en la columna C).
-        cab = [(f, col) for (col, f), v in c.items() if isinstance(v, str) and 15 <= f <= 30 and col >= 9 and v.strip().lower().startswith("curtailment")]
+        cab = [(f, col) for (col, f), v in c.items() if isinstance(v, str) and 15 <= f <= 30 and col >= 9 and v.strip().lower().startswith("curtailment") and "esperado" not in v.lower()]
         if not cab:
             continue
         f_cab, col_c = min(cab)
         # Columna «Inversores [MWh]» (pérdidas por inversores fuera de servicio), si el informe la trae.
         inv_h = sorted((col, f) for (col, f), v in c.items() if isinstance(v, str) and 15 <= f <= 30 and col >= 9 and v.strip().lower().startswith(("inversores", "inverters", "losses")))
         col_i = next((col for col, f in inv_h if abs(f - f_cab) <= 2), None)
+        # Columna «Curtailment esperado [MWh]» (lo que ya consideraba el modelo del budget); solo existe en algunos informes.
+        esp_h = sorted((col, f) for (col, f), v in c.items() if isinstance(v, str) and 15 <= f <= 30 and col >= 9
+                       and "curtailment" in v.lower() and "esperado" in v.lower())
+        col_e = next((col for col, f in esp_h if abs(f - f_cab) <= 2), None)
         # Budget de recurso del mes: celda bajo el encabezado «TMY» (junto a «Ppto» y «Gen Ppto»); su fila cambia según el informe.
         tmy = sorted((f, col) for (col, f), v in c.items() if isinstance(v, str) and v.strip() == "TMY" and f > f_cab)
         ppto_rec = c.get((tmy[0][1], tmy[0][0] + 1)) if tmy else None
@@ -1465,12 +1471,14 @@ def leer_curtailment_informe(contenido, nombre_archivo=""):
             fecha, valor, rad = pd.Timestamp("1899-12-30") + pd.Timedelta(days=int(v)), c.get((col_c, f)), c.get((4, f))
             if isinstance(rad, float) and rad > 0:
                 perd = c.get((col_i, f)) if col_i else None
-                filas.append((fecha, valor if isinstance(valor, float) else float("nan"), rad, ppto_rec, perd if isinstance(perd, float) else float("nan")))
+                esp = c.get((col_e, f)) if col_e else None
+                filas.append((fecha, valor if isinstance(valor, float) else float("nan"), rad, ppto_rec,
+                              perd if isinstance(perd, float) else float("nan"), esp if isinstance(esp, float) else float("nan")))
     if proyecto is None:
         avisos.append(f"{nombre_archivo}: no se reconoció a qué proyecto corresponde el informe.")
     if not filas:
         avisos.append(f"{nombre_archivo}: no se encontró curtailment diario en las hojas mensuales.")
-    df = pd.DataFrame(filas, columns=["Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes", "Inversores_MWh"])
+    df = pd.DataFrame(filas, columns=["Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes", "Inversores_MWh", "Curtailment_Esperado_MWh"])
     df.insert(0, "Proyecto", proyecto)
     return df.drop_duplicates(["Proyecto", "Fecha"], keep="last")[COLS_CURT], proyecto, avisos
 
@@ -1597,7 +1605,7 @@ def _leyenda_abajo(ax, ncol, ax2=None):
     ax.legend(h, l, loc="upper center", bbox_to_anchor=(.5, -.2), ncol=ncol, frameon=False, fontsize=8)
 
 
-def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None, esperada=None, inv=None):
+def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None, esperada=None, inv=None, curt_esp=None):
     """Producción acumulada del mes frente al budget acumulado, día a día."""
     dias = pd.date_range(ini_mes, fin_mes, freq="D")
     x = list(range(1, len(dias) + 1))
@@ -1612,11 +1620,17 @@ def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None, 
     ax.plot(x, r.to_numpy(), color=C_REAL_AC, linewidth=1.8, marker="o", markersize=3.4, label="Real acumulado")
     con_curt = curt is not None and ultimo is not None and curt.reindex(dias).notna().any()
     if con_curt:  # energía que se habría generado sin curtailment
-        pot = (r0.fillna(0) + curt.reindex(dias).where(dias <= fin).fillna(0)).cumsum().where(dias <= ultimo)
+        c_ = curt.reindex(dias).where(dias <= fin)
+        if curt_esp is not None:  # el modelo del budget ya contemplaba este curtailment: se descuenta día a día
+            c_ = c_ - curt_esp.reindex(dias).where(dias <= fin).fillna(0)
+        pot = (r0.fillna(0) + c_.fillna(0)).cumsum().where(dias <= ultimo)
         ax.plot(x, pot.to_numpy(), color=C_CURT, linewidth=1.7, linestyle=(0, (3, 2)), label="Real + curtailment acumulado")
     con_inv = inv is not None and con_curt and inv.reindex(dias).where(dias <= fin).notna().any()
     if con_inv:  # real + curtailment + pérdidas por inversores
-        tot = (r0.fillna(0) + curt.reindex(dias).where(dias <= fin).fillna(0) + inv.reindex(dias).where(dias <= fin).fillna(0)).cumsum().where(dias <= ultimo)
+        c2 = curt.reindex(dias).where(dias <= fin)
+        if curt_esp is not None:
+            c2 = c2 - curt_esp.reindex(dias).where(dias <= fin).fillna(0)
+        tot = (r0.fillna(0) + c2.fillna(0) + inv.reindex(dias).where(dias <= fin).fillna(0)).cumsum().where(dias <= ultimo)
         ax.plot(x, tot.to_numpy(), color=C_INV, linewidth=1.8, linestyle=(0, (1, 1.6)), label="Real + curtailment + inversores")
     con_esp = esperada is not None and esperada.reindex(dias).where(dias <= fin).notna().any()
     if con_esp:  # lo que debería generar según el recurso del día
@@ -1754,7 +1768,7 @@ def _seccion_pv(p, y, num, n, d, semana, ini, fin, ini_mes, fin_mes, series, bud
                    {"celdas": [f"Mes completo ({MESES[fin.month - 1].lower()})", f_(r_mes), f_(b_comp), p_(r_mes, b_comp)], "cumpl": None}]
         y = _tabla_periodos(p, y - 8, ["Recurso solar", "Real\n[kWh/m²]", "Budget\n[kWh/m²]", "Real vs budget\n[%]"], filas_r, (.38, .17, .17, .28), 3)
     alto = ANCHO * .33
-    y = p.figura(y, grafico_acumulado(series[n], budgets[n], ini, fin, ini_mes, fin_mes, semana, curt if con_curt else None, esperada, d.get("inv")),
+    y = p.figura(y, grafico_acumulado(series[n], budgets[n], ini, fin, ini_mes, fin_mes, semana, curt if con_curt else None, esperada, d.get("inv"), d.get("curt_esp")),
                  "Producción acumulada vs budget acumulado", alto)
     return y
 
@@ -1830,6 +1844,8 @@ def generar_informe_corporativo(fin, tipo, precios_t, df_bud_proy, df_bud_bess, 
             suj = df_curt[df_curt["Proyecto"] == n].drop_duplicates("Fecha", keep="last").set_index("Fecha")
             if "Radiacion_kWhm2" in suj and suj["Radiacion_kWhm2"].notna().any() and n in POTENCIA_MWP:
                 datos[n]["rec"] = suj["Radiacion_kWhm2"].reindex(dias)
+                if n != "MARIA ELENA PFV" and "Curtailment_Esperado_MWh" in suj and suj["Curtailment_Esperado_MWh"].notna().any():
+                    datos[n]["curt_esp"] = suj["Curtailment_Esperado_MWh"].reindex(dias)
                 if "Inversores_MWh" in suj and suj["Inversores_MWh"].notna().any():
                     datos[n]["inv"] = suj["Inversores_MWh"].reindex(dias)
                 datos[n]["pot"] = POTENCIA_MWP[n]
