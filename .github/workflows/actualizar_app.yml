@@ -1,0 +1,40 @@
+name: Mantener y actualizar la app
+
+on:
+  schedule:
+    # Horas en UTC. Chile es UTC-3 en verano y UTC-4 en invierno, por eso se incluyen ambas (11 y 12 UTC = 8:00; 15 y 16 UTC = 12:00).
+    # El script mira la hora de Chile y solo actualiza a las 8 y a las 12; las otras ejecuciones solo mantienen despierta la app.
+    - cron: "7 3,7,11,12,15,16,19,23 * * *"
+  workflow_dispatch:
+    inputs:
+      forzar:
+        description: "Actualizar los datos ahora (aunque no sea 8:00 ni 12:00)"
+        type: boolean
+        default: true
+
+jobs:
+  visitar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar navegador
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+      - name: Abrir la app
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          TOKEN_ACTUALIZACION: ${{ secrets.TOKEN_ACTUALIZACION }}
+          FORZAR: ${{ github.event.inputs.forzar }}
+        run: python scripts/visitar_app.py
+      - name: Captura si falló
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fallo
+          path: fallo.png
+          if-no-files-found: ignore
