@@ -1742,12 +1742,10 @@ def _armar_informe_corporativo(total_paginas, semana, tipo, ini, fin, ini_mes, f
     y = p.nueva_pagina()
     y = _seccion_bess(p, y, 1, datos["MARIA ELENA BESS"], semana, ini, fin, ini_mes, fin_mes, series, budgets)
     for num, n in enumerate(("MARIA ELENA PFV", "SAN PEDRO III", "DOÑA CARMEN"), start=2):
-        y = p.nueva_pagina()
+        y = p.pagina_si_falta(y - 14, 305)
         y = _seccion_pv(p, y, num, n, datos[n], semana, ini, fin, ini_mes, fin_mes, series, budgets, datos[n].get("curt"))
-    primero = True
     for num, n in enumerate(PROYECTOS_PMGD, start=5):
-        y = p.nueva_pagina() if primero else p.pagina_si_falta(y - 14, 300)
-        primero = False
+        y = p.pagina_si_falta(y - 14, 305)
         y = _seccion_pv(p, y, num, n, datos[n], semana, ini, fin, ini_mes, fin_mes, series, budgets)
     p.notas(y, [f"Informe generado el {generado:%d-%m-%Y %H:%M} (hora de Chile)."])
     return p.cerrar(), p.pag
