@@ -1356,7 +1356,7 @@ def generar_reportes_semana(fin, tipo, precios_t=(), bud_proy=None, bud_bess=Non
 import re  # noqa: E402
 HOJAS_MES = ("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
 ARCHIVO_CURTAILMENT = RAIZ / "curtailment_diario.csv"  # base opcional en el repositorio (la deja el propio dashboard para descargar)
-COLS_CURT = ["Proyecto", "Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes"]
+COLS_CURT = ["Proyecto", "Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes", "Inversores_MWh"]
 # Potencia nominal [MWp] para la generación esperada (recurso × potencia). María Elena y Doña Carmen: hoja «Constantes»; San Pedro: III + VI.
 POTENCIA_MWP = {"MARIA ELENA PFV": 72.8, "DOÑA CARMEN": 40.0, "SAN PEDRO III": 33.672 + 23.855}
 _NS_XL = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -1452,6 +1452,9 @@ def leer_curtailment_informe(contenido, nombre_archivo=""):
         if not cab:
             continue
         f_cab, col_c = min(cab)
+        # Columna «Inversores [MWh]» (pérdidas por inversores fuera de servicio), si el informe la trae.
+        inv_h = sorted((col, f) for (col, f), v in c.items() if isinstance(v, str) and 15 <= f <= 30 and col >= 9 and v.strip().lower().startswith(("inversores", "inverters", "losses")))
+        col_i = next((col for col, f in inv_h if abs(f - f_cab) <= 2), None)
         # Budget de recurso del mes: celda bajo el encabezado «TMY» (junto a «Ppto» y «Gen Ppto»); su fila cambia según el informe.
         tmy = sorted((f, col) for (col, f), v in c.items() if isinstance(v, str) and v.strip() == "TMY" and f > f_cab)
         ppto_rec = c.get((tmy[0][1], tmy[0][0] + 1)) if tmy else None
@@ -1461,12 +1464,13 @@ def leer_curtailment_informe(contenido, nombre_archivo=""):
                 continue
             fecha, valor, rad = pd.Timestamp("1899-12-30") + pd.Timedelta(days=int(v)), c.get((col_c, f)), c.get((4, f))
             if isinstance(rad, float) and rad > 0:
-                filas.append((fecha, valor if isinstance(valor, float) else float("nan"), rad, ppto_rec))
+                perd = c.get((col_i, f)) if col_i else None
+                filas.append((fecha, valor if isinstance(valor, float) else float("nan"), rad, ppto_rec, perd if isinstance(perd, float) else float("nan")))
     if proyecto is None:
         avisos.append(f"{nombre_archivo}: no se reconoció a qué proyecto corresponde el informe.")
     if not filas:
         avisos.append(f"{nombre_archivo}: no se encontró curtailment diario en las hojas mensuales.")
-    df = pd.DataFrame(filas, columns=["Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes"])
+    df = pd.DataFrame(filas, columns=["Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes", "Inversores_MWh"])
     df.insert(0, "Proyecto", proyecto)
     return df.drop_duplicates(["Proyecto", "Fecha"], keep="last")[COLS_CURT], proyecto, avisos
 
@@ -1551,7 +1555,7 @@ def metricas(real, bud, ini, fin, ini_mes, fin_mes):
     return m
 
 
-C_REAL_AC, C_BUDGET_AC, C_SEMANA, C_CURT, C_ESPERADA = "#A3242F", "#1565C0", "#2E9E3E", "#E8892B", "#7A8288"
+C_REAL_AC, C_BUDGET_AC, C_SEMANA, C_CURT, C_ESPERADA, C_INV = "#A3242F", "#1565C0", "#2E9E3E", "#E8892B", "#7A8288", "#1E8449"
 
 
 def _png_fijo(fig):
@@ -1593,7 +1597,7 @@ def _leyenda_abajo(ax, ncol, ax2=None):
     ax.legend(h, l, loc="upper center", bbox_to_anchor=(.5, -.2), ncol=ncol, frameon=False, fontsize=8)
 
 
-def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None, esperada=None):
+def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None, esperada=None, inv=None):
     """Producción acumulada del mes frente al budget acumulado, día a día."""
     dias = pd.date_range(ini_mes, fin_mes, freq="D")
     x = list(range(1, len(dias) + 1))
@@ -1610,6 +1614,10 @@ def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None, 
     if con_curt:  # energía que se habría generado sin curtailment
         pot = (r0.fillna(0) + curt.reindex(dias).where(dias <= fin).fillna(0)).cumsum().where(dias <= ultimo)
         ax.plot(x, pot.to_numpy(), color=C_CURT, linewidth=1.7, linestyle=(0, (3, 2)), label="Real + curtailment acumulado")
+    con_inv = inv is not None and con_curt and inv.reindex(dias).where(dias <= fin).notna().any()
+    if con_inv:  # real + curtailment + pérdidas por inversores
+        tot = (r0.fillna(0) + curt.reindex(dias).where(dias <= fin).fillna(0) + inv.reindex(dias).where(dias <= fin).fillna(0)).cumsum().where(dias <= ultimo)
+        ax.plot(x, tot.to_numpy(), color=C_INV, linewidth=1.8, linestyle=(0, (1, 1.6)), label="Real + curtailment + inversores")
     con_esp = esperada is not None and esperada.reindex(dias).where(dias <= fin).notna().any()
     if con_esp:  # lo que debería generar según el recurso del día
         e0 = esperada.reindex(dias).where(dias <= fin)
@@ -1620,8 +1628,9 @@ def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None, 
     if ultimo is not None:
         ax.annotate(fmt(r.loc[ref], 0), (ref.day, r.loc[ref]), xytext=(0, -13), textcoords="offset points", ha="center", fontsize=8, color=C_REAL_AC, fontweight="bold")
         ax.annotate(fmt(bud_ac.loc[ref], 0), (ref.day, bud_ac.loc[ref]), xytext=(0, 7), textcoords="offset points", ha="center", fontsize=8, color=C_BUDGET_AC, fontweight="bold")
-    _leyenda_abajo(ax, 2 + bool(con_curt) + bool(con_esp))
-    fig.subplots_adjust(left=.085, right=.985, top=.855, bottom=.25)
+    n_leyenda = 2 + bool(con_curt) + bool(con_inv) + bool(con_esp)
+    _leyenda_abajo(ax, 3 if n_leyenda > 4 else n_leyenda)
+    fig.subplots_adjust(left=.085, right=.985, top=.855, bottom=.30 if n_leyenda > 4 else .25)
     return fig
 
 
@@ -1745,7 +1754,7 @@ def _seccion_pv(p, y, num, n, d, semana, ini, fin, ini_mes, fin_mes, series, bud
                    {"celdas": [f"Mes completo ({MESES[fin.month - 1].lower()})", f_(r_mes), f_(b_comp), p_(r_mes, b_comp)], "cumpl": None}]
         y = _tabla_periodos(p, y - 8, ["Recurso solar", "Real\n[kWh/m²]", "Budget\n[kWh/m²]", "Real vs budget\n[%]"], filas_r, (.38, .17, .17, .28), 3)
     alto = ANCHO * .33
-    y = p.figura(y, grafico_acumulado(series[n], budgets[n], ini, fin, ini_mes, fin_mes, semana, curt if con_curt else None, esperada),
+    y = p.figura(y, grafico_acumulado(series[n], budgets[n], ini, fin, ini_mes, fin_mes, semana, curt if con_curt else None, esperada, d.get("inv")),
                  "Producción acumulada vs budget acumulado", alto)
     return y
 
@@ -1821,6 +1830,8 @@ def generar_informe_corporativo(fin, tipo, precios_t, df_bud_proy, df_bud_bess, 
             suj = df_curt[df_curt["Proyecto"] == n].drop_duplicates("Fecha", keep="last").set_index("Fecha")
             if "Radiacion_kWhm2" in suj and suj["Radiacion_kWhm2"].notna().any() and n in POTENCIA_MWP:
                 datos[n]["rec"] = suj["Radiacion_kWhm2"].reindex(dias)
+                if "Inversores_MWh" in suj and suj["Inversores_MWh"].notna().any():
+                    datos[n]["inv"] = suj["Inversores_MWh"].reindex(dias)
                 datos[n]["pot"] = POTENCIA_MWP[n]
                 pp = suj["Ppto_Recurso_Mes"].dropna()
                 datos[n]["rec_ppto"] = pp.groupby(pp.index.to_period("M")).first().to_dict()
