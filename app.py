@@ -1706,8 +1706,6 @@ def _seccion_pv(p, y, num, n, d, semana, ini, fin, ini_mes, fin_mes, series, bud
     alto = ANCHO * .33
     y = p.figura(y, grafico_acumulado(series[n], budgets[n], ini, fin, ini_mes, fin_mes, semana, curt if con_curt else None),
                  "Producción acumulada vs budget acumulado", alto)
-    if con_curt:
-        y = p.figura(y, grafico_curtailment(curt, ini, fin, ini_mes, fin_mes, semana), "Energía perdida por curtailment diario", alto)
     return y
 
 
