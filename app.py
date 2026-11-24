@@ -1646,6 +1646,18 @@ pend_proy = tuple((p, per) for p in PROYECTOS for per in PERIODOS_ANIO if (p, pe
 existentes_b = {f"{r.Anio:04d}{r.Mes:02d}" for r in df_con_bess.itertuples()}
 pend_bess = tuple(per for per in PERIODOS_ANIO if per not in existentes_b)
 
+# Actualización programada: un GitHub Action abre la app con ?actualizar=<TOKEN_ACTUALIZACION> a las 8:00 y 12:00 (hora de Chile).
+# Con el token correcto se vacía la caché antes de cargar los datos, una sola vez por sesión.
+try:
+    _token = str(st.secrets.get("TOKEN_ACTUALIZACION", ""))
+except Exception:
+    _token = ""
+if _token and st.query_params.get("actualizar") == _token and not st.session_state.get("actualizado_por_token"):
+    with ALM["lock"]:
+        ALM["datos"].clear()
+    st.cache_data.clear()
+    st.session_state.actualizado_por_token = True
+
 with st.spinner("Consultando datos a las API del Coordinador…"):
     api_proy, api_bess, api_bess_diario, adv_mensual = cargar_mensuales_api(pend_proy, pend_bess, PRECIOS_T)
     df_carrusel, adv_carrusel = cargar_diarios_carrusel(tuple(PERIODOS_CARRUSEL), CARRUSEL_INI.isoformat(), CARRUSEL_FIN.isoformat())
