@@ -1356,6 +1356,9 @@ def generar_reportes_semana(fin, tipo, precios_t=(), bud_proy=None, bud_bess=Non
 import re  # noqa: E402
 HOJAS_MES = ("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
 ARCHIVO_CURTAILMENT = RAIZ / "curtailment_diario.csv"  # base opcional en el repositorio (la deja el propio dashboard para descargar)
+COLS_CURT = ["Proyecto", "Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes"]
+# Potencia nominal [MWp] para la generación esperada (recurso × potencia). María Elena y Doña Carmen: hoja «Constantes»; San Pedro: III + VI.
+POTENCIA_MWP = {"MARIA ELENA PFV": 72.8, "DOÑA CARMEN": 40.0, "SAN PEDRO III": 33.672 + 23.855}
 _NS_XL = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 
@@ -1429,14 +1432,14 @@ def _proyecto_del_informe(titulo, nombre_archivo):
 
 @st.cache_data(show_spinner=False)
 def leer_curtailment_informe(contenido, nombre_archivo=""):
-    """Curtailment diario [MWh] de un informe diario. Devuelve (DataFrame[Proyecto, Fecha, Curtailment_MWh], proyecto, avisos).
-    Solo cuenta días con dato real: radiación > 0 (un día todavía sin datos aparece con ceros en la plantilla)."""
+    """Curtailment [MWh], radiación [kWh/m²] y budget de recurso del mes (TMY) por día, desde un informe diario.
+    Devuelve (DataFrame[COLS_CURT], proyecto, avisos). Solo cuenta días con dato real: radiación > 0 (un día todavía sin datos aparece con ceros en la plantilla)."""
     avisos = []
     try:
         z = zipfile.ZipFile(io.BytesIO(contenido))
         rutas, textos = _rutas_hojas(z), _textos_compartidos(z)
     except Exception as error:
-        return pd.DataFrame(columns=["Proyecto", "Fecha", "Curtailment_MWh"]), None, [f"{nombre_archivo}: no es un libro de Excel válido ({error})."]
+        return pd.DataFrame(columns=COLS_CURT), None, [f"{nombre_archivo}: no es un libro de Excel válido ({error})."]
     proyecto, filas = None, []
     for hoja in HOJAS_MES:
         if hoja not in rutas or rutas[hoja] not in z.namelist():
@@ -1449,37 +1452,41 @@ def leer_curtailment_informe(contenido, nombre_archivo=""):
         if not cab:
             continue
         f_cab, col_c = min(cab)
+        # Budget de recurso del mes: celda bajo el encabezado «TMY» (junto a «Ppto» y «Gen Ppto»); su fila cambia según el informe.
+        tmy = sorted((f, col) for (col, f), v in c.items() if isinstance(v, str) and v.strip() == "TMY" and f > f_cab)
+        ppto_rec = c.get((tmy[0][1], tmy[0][0] + 1)) if tmy else None
+        ppto_rec = ppto_rec if isinstance(ppto_rec, float) and ppto_rec > 0 else float("nan")
         for (col, f), v in sorted(c.items(), key=lambda x: x[0][1]):
             if col != 3 or f <= f_cab or not isinstance(v, float) or not 40000 < v < 60000:
                 continue
             fecha, valor, rad = pd.Timestamp("1899-12-30") + pd.Timedelta(days=int(v)), c.get((col_c, f)), c.get((4, f))
-            if isinstance(valor, float) and isinstance(rad, float) and rad > 0:
-                filas.append((fecha, valor))
+            if isinstance(rad, float) and rad > 0:
+                filas.append((fecha, valor if isinstance(valor, float) else float("nan"), rad, ppto_rec))
     if proyecto is None:
         avisos.append(f"{nombre_archivo}: no se reconoció a qué proyecto corresponde el informe.")
     if not filas:
         avisos.append(f"{nombre_archivo}: no se encontró curtailment diario en las hojas mensuales.")
-    df = pd.DataFrame(filas, columns=["Fecha", "Curtailment_MWh"])
+    df = pd.DataFrame(filas, columns=["Fecha", "Curtailment_MWh", "Radiacion_kWhm2", "Ppto_Recurso_Mes"])
     df.insert(0, "Proyecto", proyecto)
-    return df.drop_duplicates(["Proyecto", "Fecha"], keep="last"), proyecto, avisos
+    return df.drop_duplicates(["Proyecto", "Fecha"], keep="last")[COLS_CURT], proyecto, avisos
 
 
 def unir_curtailment(*bases):
     """Une tablas de curtailment; si un día está en varias, gana la última."""
     validas = [b for b in bases if b is not None and not b.empty]
     if not validas:
-        return pd.DataFrame(columns=["Proyecto", "Fecha", "Curtailment_MWh"])
-    return pd.concat(validas, ignore_index=True).drop_duplicates(["Proyecto", "Fecha"], keep="last").sort_values(["Proyecto", "Fecha"]).reset_index(drop=True)
+        return pd.DataFrame(columns=COLS_CURT)
+    return pd.concat(validas, ignore_index=True).reindex(columns=COLS_CURT).drop_duplicates(["Proyecto", "Fecha"], keep="last").sort_values(["Proyecto", "Fecha"]).reset_index(drop=True)
 
 
 def cargar_curtailment_repo():
     try:
         if ARCHIVO_CURTAILMENT.exists():
             df = pd.read_csv(ARCHIVO_CURTAILMENT, parse_dates=["Fecha"])
-            return df[["Proyecto", "Fecha", "Curtailment_MWh"]]
+            return df.reindex(columns=COLS_CURT)
     except Exception:
         pass
-    return pd.DataFrame(columns=["Proyecto", "Fecha", "Curtailment_MWh"])
+    return pd.DataFrame(columns=COLS_CURT)
 
 
 # =========================================================
@@ -1544,7 +1551,7 @@ def metricas(real, bud, ini, fin, ini_mes, fin_mes):
     return m
 
 
-C_REAL_AC, C_BUDGET_AC, C_SEMANA, C_CURT = "#A3242F", "#1565C0", "#2E9E3E", "#E8892B"
+C_REAL_AC, C_BUDGET_AC, C_SEMANA, C_CURT, C_ESPERADA = "#A3242F", "#1565C0", "#2E9E3E", "#E8892B", "#7A8288"
 
 
 def _png_fijo(fig):
@@ -1586,7 +1593,7 @@ def _leyenda_abajo(ax, ncol, ax2=None):
     ax.legend(h, l, loc="upper center", bbox_to_anchor=(.5, -.2), ncol=ncol, frameon=False, fontsize=8)
 
 
-def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None):
+def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None, esperada=None):
     """Producción acumulada del mes frente al budget acumulado, día a día."""
     dias = pd.date_range(ini_mes, fin_mes, freq="D")
     x = list(range(1, len(dias) + 1))
@@ -1603,11 +1610,17 @@ def grafico_acumulado(real, bud, ini, fin, ini_mes, fin_mes, semana, curt=None):
     if con_curt:  # energía que se habría generado sin curtailment
         pot = (r0.fillna(0) + curt.reindex(dias).where(dias <= fin).fillna(0)).cumsum().where(dias <= ultimo)
         ax.plot(x, pot.to_numpy(), color=C_CURT, linewidth=1.7, linestyle=(0, (3, 2)), label="Real + curtailment acumulado")
+    con_esp = esperada is not None and esperada.reindex(dias).where(dias <= fin).notna().any()
+    if con_esp:  # lo que debería generar según el recurso del día
+        e0 = esperada.reindex(dias).where(dias <= fin)
+        ult_e = e0.last_valid_index()
+        ec = e0.fillna(0).cumsum().where(dias <= ult_e)
+        ax.plot(x, ec.to_numpy(), color=C_ESPERADA, linewidth=1.8, label="Generación esperada")
     ax.set_ylim(bottom=0)
     if ultimo is not None:
         ax.annotate(fmt(r.loc[ref], 0), (ref.day, r.loc[ref]), xytext=(0, -13), textcoords="offset points", ha="center", fontsize=8, color=C_REAL_AC, fontweight="bold")
         ax.annotate(fmt(bud_ac.loc[ref], 0), (ref.day, bud_ac.loc[ref]), xytext=(0, 7), textcoords="offset points", ha="center", fontsize=8, color=C_BUDGET_AC, fontweight="bold")
-    _leyenda_abajo(ax, 3 if con_curt else 2)
+    _leyenda_abajo(ax, 2 + bool(con_curt) + bool(con_esp))
     fig.subplots_adjust(left=.085, right=.985, top=.855, bottom=.25)
     return fig
 
@@ -1678,6 +1691,19 @@ def _tabla_periodos(p, y, cab, filas, anchos, col_cumpl):
     return p.tabla(y, datos, [ANCHO * w for w in anchos], fuente=8.5, con_total=False, extra=extra, alto_cab=30)
 
 
+def _recurso_periodo(rec, ppto, a_, b_):
+    """Recurso real [kWh/m²] y budget prorrateado por día de un periodo. Budget None si falta el del mes."""
+    real = rec[a_:b_]
+    real = real.sum() if real.notna().any() else None
+    bud = 0.0
+    for dia in pd.date_range(a_, b_, freq="D"):
+        v = ppto.get(dia.to_period("M"))
+        if v is None or pd.isna(v):
+            return real, None
+        bud += v / dia.days_in_month
+    return real, bud
+
+
 def _seccion_pv(p, y, num, n, d, semana, ini, fin, ini_mes, fin_mes, series, budgets, curt=None):
     m, nombre = d["m"], NOMBRES_CORP[n]
     y = p.titulo_proyecto(y, num, nombre)
@@ -1690,21 +1716,36 @@ def _seccion_pv(p, y, num, n, d, semana, ini, fin, ini_mes, fin_mes, series, bud
     sem = [_etq_semana(semana, ini, fin), fmt(m["real_sem"], 1), fmt(m["bud_sem"], 1), fmt(m["cump_sem"], 1)]
     mes = [f"Mes al {fin:%d-%m}", fmt(m["real_mes"], 1), fmt(m["bud_acum"], 1), fmt(m["cump_acum"], 1)]
     comp = [f"Mes completo ({MESES[fin.month - 1].lower()})", fmt(m["real_mes"], 1), fmt(m["bud_mes"], 1), fmt(m["avance"], 1)]
-    anchos = (.38, .17, .17, .28)
+    anchos = [.38, .17, .17, .28]
+    def _suma(serie, a_, b_):
+        v = serie[a_:b_]
+        return fmt(v.sum(), 1) if v.notna().any() else "–"
     con_curt = curt is not None and curt[ini_mes:fin].notna().any()
-    if con_curt:
-        def _suma(a_, b_):
-            v = curt[a_:b_]
-            return fmt(v.sum(), 1) if v.notna().any() else "–"
-        cab += ["Curtailment\n[MWh]"]
-        sem += [_suma(ini, fin)]
-        mes += [_suma(ini_mes, fin)]
-        comp += [""]
-        anchos = (.34, .15, .15, .18, .18)
+    rec, esperada = d.get("rec"), None
+    if rec is not None and rec[min(ini, ini_mes):fin].notna().any():
+        esperada = rec * d["pot"]
+    for activa, titulo, serie in ((con_curt, "Curtailment\n[MWh]", curt), (esperada is not None, "Esperada\n[MWh]", esperada)):
+        if activa:
+            cab.append(titulo)
+            sem.append(_suma(serie, ini, fin))
+            mes.append(_suma(serie, ini_mes, fin))
+            comp.append("")
+    anchos = {4: (.38, .17, .17, .28), 5: (.34, .15, .15, .18, .18), 6: (.28, .12, .12, .16, .16, .16)}[len(cab)]
     filas = [{"celdas": sem, "cumpl": m["cump_sem"]}, {"celdas": mes, "cumpl": m["cump_acum"]}, {"celdas": comp, "cumpl": None}]
     y = _tabla_periodos(p, y, cab, filas, anchos, 3)
+    if esperada is not None:  # recurso solar real frente al budget de recurso
+        ppto = d.get("rec_ppto") or {}
+        r_sem, b_sem = _recurso_periodo(rec, ppto, ini, fin)
+        r_mes, b_mes = _recurso_periodo(rec, ppto, ini_mes, fin)
+        b_comp = ppto.get(ini_mes.to_period("M"))
+        f_ = lambda v: fmt(v, 1) if v is not None and pd.notna(v) else "–"
+        p_ = lambda a_, b_: fmt(pct(a_, b_), 1) if pct(a_, b_) is not None else "–"
+        filas_r = [{"celdas": [_etq_semana(semana, ini, fin), f_(r_sem), f_(b_sem), p_(r_sem, b_sem)], "cumpl": None},
+                   {"celdas": [f"Mes al {fin:%d-%m}", f_(r_mes), f_(b_mes), p_(r_mes, b_mes)], "cumpl": None},
+                   {"celdas": [f"Mes completo ({MESES[fin.month - 1].lower()})", f_(r_mes), f_(b_comp), p_(r_mes, b_comp)], "cumpl": None}]
+        y = _tabla_periodos(p, y - 8, ["Recurso solar", "Real\n[kWh/m²]", "Budget\n[kWh/m²]", "Real vs budget\n[%]"], filas_r, (.38, .17, .17, .28), 3)
     alto = ANCHO * .33
-    y = p.figura(y, grafico_acumulado(series[n], budgets[n], ini, fin, ini_mes, fin_mes, semana, curt if con_curt else None),
+    y = p.figura(y, grafico_acumulado(series[n], budgets[n], ini, fin, ini_mes, fin_mes, semana, curt if con_curt else None, esperada),
                  "Producción acumulada vs budget acumulado", alto)
     return y
 
@@ -1742,7 +1783,7 @@ def _armar_informe_corporativo(total_paginas, semana, tipo, ini, fin, ini_mes, f
     y = p.nueva_pagina()
     y = _seccion_bess(p, y, 1, datos["MARIA ELENA BESS"], semana, ini, fin, ini_mes, fin_mes, series, budgets)
     for num, n in enumerate(("MARIA ELENA PFV", "SAN PEDRO III", "DOÑA CARMEN"), start=2):
-        y = p.pagina_si_falta(y - 14, 305)
+        y = p.pagina_si_falta(y - 14, 305 + (100 if datos[n].get("rec") is not None else 0))
         y = _seccion_pv(p, y, num, n, datos[n], semana, ini, fin, ini_mes, fin_mes, series, budgets, datos[n].get("curt"))
     for num, n in enumerate(PROYECTOS_PMGD, start=5):
         y = p.pagina_si_falta(y - 14, 305)
@@ -1777,6 +1818,12 @@ def generar_informe_corporativo(fin, tipo, precios_t, df_bud_proy, df_bud_bess, 
             sub = df_curt[df_curt["Proyecto"] == n].set_index("Fecha")["Curtailment_MWh"]
             if not sub.empty:
                 datos[n]["curt"] = sub[~sub.index.duplicated(keep="last")].reindex(dias)
+            suj = df_curt[df_curt["Proyecto"] == n].drop_duplicates("Fecha", keep="last").set_index("Fecha")
+            if "Radiacion_kWhm2" in suj and suj["Radiacion_kWhm2"].notna().any() and n in POTENCIA_MWP:
+                datos[n]["rec"] = suj["Radiacion_kWhm2"].reindex(dias)
+                datos[n]["pot"] = POTENCIA_MWP[n]
+                pp = suj["Ppto_Recurso_Mes"].dropna()
+                datos[n]["rec_ppto"] = pp.groupby(pp.index.to_period("M")).first().to_dict()
     # BESS
     hb = horario["BESS MARIA ELENA"]
     ppa, spot, carga = (_dia_de(hb, c, dias) for c in ("Energía PPA kWh", "Energía Spot kWh", "Carga BESS kWh"))
@@ -2173,9 +2220,9 @@ with tab_rep:
                "avance de la semana y del mes frente al budget, con su gráfico acumulado. "
                "Usa el periodo elegido arriba.")
     with st.expander("Curtailment diario (opcional): cargar informes diarios", expanded=False):
-        st.caption("Sube los informes diarios de María Elena, Doña Carmen y San Pedro III (.xlsm). Se lee solo la columna de curtailment de las hojas "
-                   "mensuales, sin IA y sin cargar el libro completo. Si el parque tiene datos, el informe añade la columna de curtailment, la curva "
-                   "«real + curtailment» y un gráfico diario.")
+        st.caption("Sube los informes diarios de María Elena, Doña Carmen y San Pedro III (.xlsm). Se leen solo el curtailment, la radiación diaria y el "
+                   "budget de recurso de las hojas mensuales, sin IA y sin cargar el libro completo. Con eso el informe añade la columna de curtailment, "
+                   "la curva «real + curtailment» y la generación esperada (recurso × potencia nominal) con su comparación de recurso contra budget.")
         subidos = st.file_uploader("Informes diarios", type=["xlsm", "xlsx"], accept_multiple_files=True, key="up_curt")
         partes = []
         for arch in subidos or []:
